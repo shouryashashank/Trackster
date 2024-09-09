@@ -165,104 +165,7 @@ def ensure_folder_path_ends_with_slash(folder_path):
         folder_path += os.sep
     return folder_path
 
-def downloader(link,exists_action):
-    t = ft.Text(value="")
-    t2 = ft.Text(value = "0")
-    pb = ft.ProgressBar(value=0)
-    def button_clicked(e):
-        t.value = "Downloading"
-        t.update()
-        b.disabled = True
-        b.update()
-        custom_labels = {
-            "Replace all": "RA",
-            "Skip all": "SA",
-            "Determine while downloading from CLI": "",
-        }
-        global file_exists_action 
-        file_exists_action = custom_labels[exists_action]
-        use_spotify_for_metadata = True
-        try:
-            load_dotenv()
-            SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
-            SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
-            client_credentials_manager = SpotifyClientCredentials(
-                client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET
-            )
-            sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
-        except Exception as e:
-            use_spotify_for_metadata = False
-            print(f"Failed to connect to Spotify API: {e}")
-            print("Continuing without Spotify API, some song metadata will not be added")
-        # link = input("Enter YouTube Playlist URL: ✨")
 
-        yt_playlist = Playlist(link)
-
-
-
-        totalVideoCount = len(yt_playlist.videos)
-        print("Total videos in playlist: 🎦", totalVideoCount)
-
-        for index, video in enumerate(yt_playlist.videos):
-            try:
-                print("Downloading: "+video.title)
-                t2.value = f"{index}/{totalVideoCount}"
-                pb.value = (index+1/totalVideoCount)
-                time.sleep(0.1)
-                view.update()
-                t2.update()
-                pb.update()
-            
-                audio = download_yt(video,video.title)
-                if audio:
-                    if(use_spotify_for_metadata):
-                        try:
-                            track_url = search_spotify(f"{video.author} {video.title}",sp)
-                        except Exception as e:
-                            print(e)
-                            track_url = None
-                        if not track_url:
-                            track_info = get_track_info_youtube(video)
-                        else:
-                            track_info = get_track_info_spotify(track_url,sp)
-                    else:
-                        track_info = get_track_info_youtube(video)
-
-                    set_metadata(track_info, audio)
-                    os.replace(audio, f"{music_folder_path}{os.path.basename(audio)}")
-            except Exception as e:
-                print(f"Failed to download {video.title} due to: {e}")
-                continue
-        t.value = "Downloaded"
-        t2.value = ""
-        t.update()
-        b.disabled = False
-        b.update()
-        print("All videos downloaded successfully!")
-    b = ft.ElevatedButton("Download Playlist", width=200000, on_click=button_clicked)
-    view = ft.Container(
-        
-        content = ft.Column(
-            [
-                b,
-                ft.Container(
-                    # image_src=img,
-                    # image_opacity= 0,
-                    # image_fit= ft.ImageFit.COVER,
-                    padding=10,
-                    content=ft.Column([
-                        ft.Divider(opacity=0),
-                        t, 
-                        pb,
-                        t2,
-                        ft.Divider(opacity=0)]),
-                        
-                    )
-                
-            ],)
-    )
-    return view
-    # return "All videos downloaded successfully!"
 
 def save_app_settings(spotify_client_id, spotify_client_secret):
     try:
@@ -281,6 +184,9 @@ def save_app_settings(spotify_client_id, spotify_client_secret):
 def get_directory_result(e: ft.FilePickerResultEvent):
     directory_path.value = e.path if e.path else "Cancelled!"
     directory_path.update()
+    global music_folder_path
+    music_folder_path = ensure_folder_path_ends_with_slash(e.path)
+    print(music_folder_path)
 
 get_directory_dialog = ft.FilePicker(on_result=get_directory_result)
 directory_path = ft.Text()
@@ -478,7 +384,117 @@ def main(page: ft.Page):
     #     page.update
     page.theme = ft.Theme(color_scheme_seed="Red")   
     gesture_detector = GestureDetector()
+    dd = ft.Dropdown(
+            label="Song Exist Action",
+            hint_text="What to do when that song already exist in your directory?",
+            options=[
+                ft.dropdown.Option("Replace all"),
+                ft.dropdown.Option("Skip all"),
+            ],
+            autofocus=True,
+        )
+    # link = "https://www.youtube.com/watch?v=uelHwf8o7_U&list=PLGyF7r13ifSqeOxzefZfjiSgSoBK2W4fQ"
+    # exists_action ="Replace all"
+    def downloader():
+        t = ft.Text(value="")
+        t2 = ft.Text(value = "0")
+        pb = ft.ProgressBar(value=0)
+        def button_clicked(e):
+            link = url.value
+            exists_action = dd.value
+            t.value = "Downloading"
+            t.update()
+            b.disabled = True
+            b.update()
+            custom_labels = {
+                "Replace all": "RA",
+                "Skip all": "SA",
+                "Determine while downloading from CLI": "",
+            }
+            global file_exists_action 
+            file_exists_action = custom_labels[exists_action]
+            use_spotify_for_metadata = True
+            try:
+                load_dotenv()
+                SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
+                SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
+                client_credentials_manager = SpotifyClientCredentials(
+                    client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET
+                )
+                sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
+            except Exception as e:
+                use_spotify_for_metadata = False
+                print(f"Failed to connect to Spotify API: {e}")
+                print("Continuing without Spotify API, some song metadata will not be added")
+            # link = input("Enter YouTube Playlist URL: ✨")
 
+            yt_playlist = Playlist(link)
+
+
+
+            totalVideoCount = len(yt_playlist.videos)
+            print("Total videos in playlist: 🎦", totalVideoCount)
+
+            for index, video in enumerate(yt_playlist.videos):
+                try:
+                    print("Downloading: "+video.title)
+                    t2.value = f"{index+1}/{totalVideoCount}"
+                    pb.value = ((index+1)/totalVideoCount)
+                    time.sleep(0.1)
+                    view.update()
+                    t2.update()
+                    pb.update()
+                
+                    audio = download_yt(video,video.title)
+                    if audio:
+                        if(use_spotify_for_metadata):
+                            try:
+                                track_url = search_spotify(f"{video.author} {video.title}",sp)
+                            except Exception as e:
+                                print(e)
+                                track_url = None
+                            if not track_url:
+                                track_info = get_track_info_youtube(video)
+                            else:
+                                track_info = get_track_info_spotify(track_url,sp)
+                        else:
+                            track_info = get_track_info_youtube(video)
+
+                        set_metadata(track_info, audio)
+                        os.replace(audio, f"{music_folder_path}{os.path.basename(audio)}")
+                except Exception as e:
+                    print(f"Failed to download {video.title} due to: {e}")
+                    continue
+            t.value = "Downloaded"
+            t2.value = ""
+            t.update()
+            b.disabled = False
+            b.update()
+            print("All videos downloaded successfully!")
+        b = ft.ElevatedButton("Download Playlist", width=200000, on_click=button_clicked)
+        view = ft.Container(
+            
+            content = ft.Column(
+                [
+                    b,
+                    ft.Container(
+                        # image_src=img,
+                        # image_opacity= 0,
+                        # image_fit= ft.ImageFit.COVER,
+                        padding=10,
+                        content=ft.Column([
+                            ft.Divider(opacity=0),
+                            t, 
+                            pb,
+                            t2,
+                            ft.Divider(opacity=0)]),
+                            
+                        )
+                    
+                ],)
+        )
+        return view
+        # return "All videos downloaded successfully!"
     youtube_tab = ft.Container(
         ft.SafeArea(
             content=ft.Column(
@@ -489,11 +505,11 @@ def main(page: ft.Page):
                     ft.Text("Enter Youtube playlist url:"),
                     url,
                     ft.Divider(opacity=0),  
-                    drop_down(),
+                    dd,
                     ft.Divider(opacity=0),
                     # ft.ElevatedButton(text="Download Playlist",width=200000),
                     ft.Divider(opacity=0),
-                    downloader("https://www.youtube.com/watch?v=uelHwf8o7_U&list=PLGyF7r13ifSqeOxzefZfjiSgSoBK2W4fQ","Replace all"),
+                    downloader(),
                     # ft.FilledButton("sp",on_click=switch_to_sp_tab)
                     gesture_detector.detector,
 
@@ -513,11 +529,11 @@ def main(page: ft.Page):
                     ft.Text("Enter Spotify playlist url:"),
                     url,
                     ft.Divider(opacity=0),  
-                    drop_down(),
+                    dd,
                     ft.Divider(opacity=0),
                     # ft.ElevatedButton(text="Download Playlist",width=200000),
                     ft.Divider(opacity=0),
-                    downloader("https://www.youtube.com/watch?v=uelHwf8o7_U&list=PLGyF7r13ifSqeOxzefZfjiSgSoBK2W4fQ","Replace all"),
+                    downloader(),
                     progress_bar(),
                     # ft.FilledButton("yt",on_click=switch_to_yt_tab)
                     gesture_detector.detector,
