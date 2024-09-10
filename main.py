@@ -167,17 +167,7 @@ def ensure_folder_path_ends_with_slash(folder_path):
 
 
 
-def save_app_settings(spotify_client_id, spotify_client_secret):
-    try:
-        env_str = "SPOTIPY_CLIENT_ID=" + spotify_client_id + "\nSPOTIPY_CLIENT_SECRET=" + spotify_client_secret
-        with open(".env", "a+") as f:
-            f.seek(0)  # Move the cursor to the beginning of the file
-            f.truncate()  # Clear the file content
-            f.write(env_str)
-    except Exception as e:
-        print(e)
-        return "app settings update failed"
-    return "app settings updated"
+
     
 
 # Open directory dialog
@@ -255,6 +245,21 @@ class GestureDetector:
         elif e.delta_x>0:
             switch_to_yt_tab(e)
 def navigation_drawer():
+    spotify_client_id = ft.TextField(keyboard_type=ft.KeyboardType.TEXT)
+    spotify_client_secret = ft.TextField(keyboard_type=ft.KeyboardType.TEXT)
+    spotify_client_id.value = os.getenv('SPOTIPY_CLIENT_ID')
+    spotify_client_secret.value = os.getenv('SPOTIPY_CLIENT_SECRET')
+    def save_app_settings(e):
+        try:
+            env_str = "SPOTIPY_CLIENT_ID=" + spotify_client_id.value + "\nSPOTIPY_CLIENT_SECRET=" + spotify_client_secret.value
+            with open(".env", "a+") as f:
+                f.seek(0)  # Move the cursor to the beginning of the file
+                f.truncate()  # Clear the file content
+                f.write(env_str)
+        except Exception as e:
+            print(e)
+            return "app settings update failed"
+        return "app settings updated"
     def page_launch(e):
         e.control.page.launch_url('https://gallery.flet.dev/icons-browser/')
     def close_end_drawer(e):
@@ -272,8 +277,11 @@ def navigation_drawer():
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN
                     ),
-                    ft.Text("Spotify api key:"),
-                    ft.TextField(keyboard_type=ft.KeyboardType.TEXT),
+                    ft.Text("Spotify client id:"),
+                    spotify_client_id,
+                    ft.Text("Spotify client secret:"),
+                    spotify_client_secret,
+                    ft.ElevatedButton("Save",on_click=save_app_settings),
                     ft.TextButton("How To Get Spotify api api Keys",on_click=page_launch)
 
                 ]
