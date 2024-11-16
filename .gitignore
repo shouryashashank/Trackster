@@ -153,3 +153,5 @@ cython_debug/
 failed_downloads.txt
 /music-yt
 assets/youtube-svgrepo-com.svgZone.Identifier
+downloaded.txt
+synced_updated.txt
