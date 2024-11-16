@@ -1,7 +1,7 @@
 import flet as ft
 import time
 import os
-from pytube import Playlist
+from pytube import Playlist, YouTube
 from moviepy.editor import *
 from mutagen.easyid3 import EasyID3
 import requests
@@ -11,6 +11,11 @@ from mutagen.id3 import APIC, ID3
 import urllib.request
 from tqdm import tqdm
 from dotenv import load_dotenv
+import ssl
+from pytube.innertube import _default_clients
+
+
+# ssl._create_default_https_context = ssl._create_unverified_context
 
 file_exists_action=""
 music_folder_path = "music-yt/"   # path to save the downloaded music
@@ -435,17 +440,24 @@ def main(page: ft.Page):
                 print(f"Failed to connect to Spotify API: {e}")
                 print("Continuing without Spotify API, some song metadata will not be added")
             # link = input("Enter YouTube Playlist URL: ✨")
-
             yt_playlist = Playlist(link)
 
 
 
             totalVideoCount = len(yt_playlist.videos)
             print("Total videos in playlist: 🎦", totalVideoCount)
-
             for index, video in enumerate(yt_playlist.videos):
                 try:
+                    
+                    try:
+                        title = video.title
+                    except:
+                        try:
+                            stream = video.streams.first()
+                        except Exception as e:
+                            print('issues accessing stream', e)
                     print("Downloading: "+video.title)
+                        
                     t2.value = f"{index+1}/{totalVideoCount}"
                     pb.value = ((index+1)/totalVideoCount)
                     time.sleep(0.1)
@@ -471,7 +483,7 @@ def main(page: ft.Page):
                         set_metadata(track_info, audio)
                         os.replace(audio, f"{music_folder_path}{os.path.basename(audio)}")
                 except Exception as e:
-                    print(f"Failed to download {video.title} due to: {e}")
+                    print(f"Failed to download due to: {e}")
                     continue
             t.value = "Downloaded"
             t2.value = ""
