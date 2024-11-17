@@ -33,6 +33,9 @@ Welcome to **Trackster**! Trackster is a funky Flet app that allows you to downl
 ### Option 2: Download Executable
 1. Go to the [Releases](https://github.com/shouryashashank/Trackster/releases) page.
 2. Download the latest executable file for your operating system.
+    - **Trackster.exe**: Use this for regular downloads.
+    - **Trackster_debug.exe**: Use this when downloading from playlists containing more than 500 songs, as it helps manage songs that fail to download due to connection issues.
+
 3. Run the downloaded executable file to start the app.
 
 ### Supported Platforms
@@ -46,6 +49,9 @@ Welcome to **Trackster**! Trackster is a funky Flet app that allows you to downl
 2. **Enter Playlist URL**: Input the URL of the YouTube or Spotify playlist you want to download.
 3. **Choose File Handling Option**: Decide what to do if a file already exists (Replace all, Skip all).
 4. **Download**: Click the "Download Playlist" button and let Trackster do the magic! 🎩✨
+
+## Limitations
+- **No Proper Continue Option**: You can pause and resume downloads by restarting the app, but it takes some time to re-initiate and could be improved.
 
 ## Disclaimer
 **Support the Artists**: This tool is intended for personal use only. Please support the artists by purchasing their music or streaming it through official channels. 💖🎶
