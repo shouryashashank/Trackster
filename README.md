@@ -49,7 +49,13 @@ Welcome to **Trackster**! Trackster is a funky Flet app that allows you to downl
 2. **Enter Playlist URL**: Input the URL of the YouTube or Spotify playlist you want to download.
 3. **Choose File Handling Option**: Decide what to do if a file already exists (Replace all, Skip all).
 4. **Download**: Click the "Download Playlist" button and let Trackster do the magic! 🎩✨
-
+   
+### Adding Spotify API Keys
+You can add your Spotify API keys through the app's settings:
+1. Click on the hamburger menu in the top right corner.
+2. Enter your Spotify Client ID and Client Secret in the provided fields.
+3. Click "Save" to update the settings.
+   
 ## Limitations
 - **No Proper Continue Option**: You can pause and resume downloads by restarting the app, but it takes some time to re-initiate and could be improved.
 
