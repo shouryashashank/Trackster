@@ -27,12 +27,16 @@ from pytube import YouTube
 import pytube.exceptions
 from rich.console import Console
 from spotipy.oauth2 import SpotifyClientCredentials
-import furl
+from yarl import URL
 import ssl
+# import sys, io
 
+# buffer = io.StringIO()
+# sys.stdout = sys.stderr = buffer
 ssl._create_default_https_context = ssl._create_unverified_context
 
 file_exists_action=""
+failed_download = False
 music_folder_path = "music-yt/"   # path to save the downloaded music
 # SPOTIPY_CLIENT_ID = "" # Spotify API client ID  # keep blank if you dont need spotify metadata
 # SPOTIPY_CLIENT_SECRET = ""  # Spotify API client secret
@@ -280,8 +284,12 @@ def navigation_drawer():
             print(e)
             return "app settings update failed"
         return "app settings updated"
-    def page_launch(e):
-        e.control.page.launch_url('https://gallery.flet.dev/icons-browser/')
+    def yt_page_launch(e):
+        e.control.page.launch_url('https://youtu.be/vT43uBHq974')
+    def petreon_page_launch(e):
+        e.control.page.launch_url('https://www.patreon.com/c/Predacons')
+    def github_page_launch(e):
+        e.control.page.launch_url('https://github.com/shouryashashank/Trackster')
     def close_end_drawer(e):
         e.control.page.end_drawer = end_drawer
         end_drawer.open = False
@@ -302,7 +310,10 @@ def navigation_drawer():
                     ft.Text("Spotify client secret:"),
                     spotify_client_secret,
                     ft.ElevatedButton("Save",on_click=save_app_settings),
-                    ft.TextButton("How To Get Spotify api api Keys",on_click=page_launch)
+                    ft.TextButton("How To Get Spotify api api Keys",on_click=yt_page_launch),
+                    ft.TextButton("Get version with api key already added.",on_click=petreon_page_launch),
+                    ft.TextButton("Help me buy a new phone",on_click=petreon_page_launch),
+                    ft.TextButton("See source code",on_click=github_page_launch)
 
                 ]
             ),
@@ -317,6 +328,12 @@ def navigation_drawer():
 
     return open_end_drawer
     
+
+def popup(page,text):
+    return ft.AlertDialog(
+        title=ft.Text(text),
+        on_dismiss=lambda e: page.add(ft.Text("Non-modal dialog dismissed")),
+    )
 
 def drop_down():
     
@@ -430,13 +447,14 @@ def find_youtube(query):
     count = 0
     while count < 5:
         try:
-            search_link = furl.furl(search_link).tostr()
+            search_link = str(URL(search_link))
             response = urllib.request.urlopen(search_link)
             break
         except:
             count += 1
     else:
         raise ValueError("Please check your internet connection and try again later.")
+        
 
     search_results = re.findall(r"watch\?v=(\S{11})", response.read().decode())
     first_vid = "https://www.youtube.com/watch?v=" + search_results[0]
@@ -482,6 +500,41 @@ def get_playlist_info(sp_playlist,sp):
         f.write("\n".join(updated_tracks))
     return tracks_info
 
+def get_album_info(sp_album,sp):
+    res = requests.get(sp_album)
+    if res.status_code != 200:
+        raise ValueError("Invalid Spotify playlist URL")
+    # pl = sp.album(sp_album)
+    
+    playlist = sp.album_tracks(sp_album)
+
+    tracks_item = playlist['items']
+
+    while playlist['next']:
+        playlist = sp.next(playlist)
+        tracks_item.extend(playlist['items'])
+
+    # tracks = [item["track"] for item in tracks_item]
+    tracks_info = []
+    track_id = []
+    # load tracks_id from synced.txt
+    if os.path.exists("synced.txt"):
+        with open("synced.txt", "r") as f:
+            track_id = f.read().splitlines()
+    updated_tracks = []
+    for track in tqdm(tracks_item):
+        updated_tracks.append(track["id"])
+        if track["id"] in track_id:
+            continue
+        track_url = f"https://open.spotify.com/track/{track['id']}"
+        track_info = get_track_info(track_url,sp)
+        # make a progress bar
+        
+        tracks_info.append(track_info)
+    # save the updated tracks_id to synced_updated.txt
+    with open("synced_updated.txt", "w") as f:
+        f.write("\n".join(updated_tracks))
+    return tracks_info
 
 def main(page: ft.Page):
     page.adaptive = True
@@ -491,6 +544,7 @@ def main(page: ft.Page):
     folder_picker = FolderPicker()
     url = ft.TextField(keyboard_type=ft.KeyboardType.TEXT)
     pb = ft.ProgressBar()
+    c1 = ft.Checkbox(label="Download only failed songs", value=False)
     # def switch_to_yt_tab(e):
     #     page.title= "Youtube"
     #     youtube_tab.visible = True
@@ -518,105 +572,120 @@ def main(page: ft.Page):
     # link = "https://www.youtube.com/watch?v=uelHwf8o7_U&list=PLGyF7r13ifSqeOxzefZfjiSgSoBK2W4fQ"
     # exists_action ="Replace all"
     def downloader():
-        t = ft.Text(value="")
-        t2 = ft.Text(value = "0")
-        pb = ft.ProgressBar(value=0)
-        def button_clicked(e):
-            link = url.value
-            exists_action = dd.value
-            t.value = "Downloading"
-            t.update()
-            b.disabled = True
-            b.update()
-            custom_labels = {
-                "Replace all": "RA",
-                "Skip all": "SA",
-                "Determine while downloading from CLI": "",
-            }
-            global file_exists_action 
-            file_exists_action = custom_labels[exists_action]
-            use_spotify_for_metadata = True
-            try:
-                load_dotenv()
-                SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
-                SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
-                client_credentials_manager = SpotifyClientCredentials(
-                    client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET
-                )
-                sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
-            except Exception as e:
-                use_spotify_for_metadata = False
-                print(f"Failed to connect to Spotify API: {e}")
-                print("Continuing without Spotify API, some song metadata will not be added")
-            # link = input("Enter YouTube Playlist URL: ✨")
-
-            yt_playlist = Playlist(link)
-
-
-
-            totalVideoCount = len(yt_playlist.videos)
-            print("Total videos in playlist: 🎦", totalVideoCount)
-
-            for index, video in enumerate(yt_playlist.videos):
+        try:
+            t = ft.Text(value="")
+            t2 = ft.Text(value = "0")
+            pb = ft.ProgressBar(value=0)
+            def button_clicked(e):
+                link = url.value
+                exists_action = dd.value
+                t.value = "Downloading"
+                t.update()
+                b.disabled = True
+                b.update()
+                custom_labels = {
+                    "Replace all": "RA",
+                    "Skip all": "SA",
+                    "Determine while downloading from CLI": "",
+                }
+                global file_exists_action 
+                file_exists_action = custom_labels[exists_action]
+                use_spotify_for_metadata = True
                 try:
-                    print("Downloading: "+video.title)
-                    t2.value = f"{index+1}/{totalVideoCount}"
-                    pb.value = ((index+1)/totalVideoCount)
-                    
-                    view.update()
-                    t2.update()
-                    pb.update()
-                
-                    audio = download_yt(video,video.title)
-                    if audio:
-                        if(use_spotify_for_metadata):
-                            try:
-                                track_url = search_spotify(f"{video.author} {video.title}",sp)
-                            except Exception as e:
-                                print(e)
-                                track_url = None
-                            if not track_url:
-                                track_info = get_track_info_youtube(video)
-                            else:
-                                track_info = get_track_info_spotify(track_url,sp)
-                        else:
-                            track_info = get_track_info_youtube(video)
-
-                        set_metadata(track_info, audio)
-                        os.replace(audio, f"{music_folder_path}{os.path.basename(audio)}")
+                    load_dotenv()
+                    SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
+                    SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
+                    client_credentials_manager = SpotifyClientCredentials(
+                        client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET
+                    )
+                    sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
                 except Exception as e:
-                    print(f"Failed to download {video.title} due to: {e}")
-                    continue
-            t.value = "Downloaded"
-            t2.value = ""
-            t.update()
-            b.disabled = False
-            b.update()
-            print("All videos downloaded successfully!")
-        b = ft.ElevatedButton("Download Playlist", width=200000, on_click=button_clicked)
-        view = ft.Container(
-            
-            content = ft.Column(
-                [
-                    b,
-                    ft.Container(
-                        # image_src=img,
-                        # image_opacity= 0,
-                        # image_fit= ft.ImageFit.COVER,
-                        padding=10,
-                        content=ft.Column([
-                            ft.Divider(opacity=0),
-                            t, 
-                            pb,
-                            t2,
-                            ft.Divider(opacity=0)]),
-                            
-                        )
+                    use_spotify_for_metadata = False
+                    print(f"Failed to connect to Spotify API: {e}")
+                    print("Continuing without Spotify API, some song metadata will not be added")
+                    exception_popup = popup(page,f"⚠️ Failed to connect to Spotify API: {e}  .  Continuing without Spotify API, some song metadata will not be added")
+                    page.open(exception_popup)
+                # link = input("Enter YouTube Playlist URL: ✨")
+
+                yt_playlist = Playlist(link)
+
+
+
+                totalVideoCount = len(yt_playlist.videos)
+                print("Total videos in playlist: 🎦", totalVideoCount)
+
+                for index, video in enumerate(yt_playlist.videos):
+                    try:
+                        if c1.value:
+                            if os.path.exists("failed_downloads.txt"):
+                                with open("failed_downloads.txt", "r") as f:
+                                    failed_songs = f.read().splitlines()
+                                if video.title not in failed_songs:
+                                    continue
+                        print("Downloading: "+video.title)
+                        t2.value = f"{index+1}/{totalVideoCount}"
+                        pb.value = ((index+1)/totalVideoCount)
+                        
+                        view.update()
+                        t2.update()
+                        pb.update()
                     
-                ],)
-        )
-        return view
-        # return "All videos downloaded successfully!"
+                        audio = download_yt(video,video.title)
+                        if audio:
+                            if(use_spotify_for_metadata):
+                                try:
+                                    track_url = search_spotify(f"{video.author} {video.title}",sp)
+                                except Exception as e:
+                                    print(e)
+                                    track_url = None
+                                if not track_url:
+                                    track_info = get_track_info_youtube(video)
+                                else:
+                                    track_info = get_track_info_spotify(track_url,sp)
+                            else:
+                                track_info = get_track_info_youtube(video)
+
+                            set_metadata(track_info, audio)
+                            os.replace(audio, f"{music_folder_path}{os.path.basename(audio)}")
+                    except Exception as e:
+                        print(f"Failed to download {video.title} due to: {e}")
+                        with open("failed_downloads.txt", "a") as f:
+                            f.write(f"{video.title}\n")
+                        continue
+                t.value = "Downloaded"
+                t2.value = ""
+                t.update()
+                b.disabled = False
+                b.update()
+                print("All videos downloaded successfully!")
+            b = ft.ElevatedButton("Download Playlist", width=200000, on_click=button_clicked)
+            view = ft.Container(
+                
+                content = ft.Column(
+                    [
+                        b,
+                        ft.Container(
+                            # image_src=img,
+                            # image_opacity= 0,
+                            # image_fit= ft.ImageFit.COVER,
+                            padding=10,
+                            content=ft.Column([
+                                ft.Divider(opacity=0),
+                                t, 
+                                pb,
+                                t2,
+                                ft.Divider(opacity=0)]),
+                                
+                            )
+                        
+                    ],)
+            )
+            return view
+            # return "All videos downloaded successfully!"
+        except Exception as e:
+            print(e)
+            exception_popup = popup(page,f"⚠️ Failed to download. make sure all the options are properly selected, and the link is correct. restart and try again")
+            page.open(exception_popup)
 
     def downloader_spotify():
         t = ft.Text(value="")
@@ -629,88 +698,106 @@ def main(page: ft.Page):
             t.update()
             b.disabled = True
             b.update()
-            custom_labels = {
-                "Replace all": "RA",
-                "Skip all": "SA",
-                "Determine while downloading from CLI": "",
-            }
-            global file_exists_action 
-            file_exists_action = custom_labels[exists_action]
-            use_spotify_for_metadata = True
             try:
-                load_dotenv()
-                SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
-                SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
-                client_credentials_manager = SpotifyClientCredentials(
-                    client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET
-                )
-                sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
-            except Exception as e:
-                use_spotify_for_metadata = False
-                print(f"Failed to connect to Spotify API: {e}")
-                print("Continuing without Spotify API, some song metadata will not be added")
-            # link = input("Enter YouTube Playlist URL: ✨")
-            if "track" in link:
-                songs = [get_track_info(link,sp)]
-            elif "playlist" in link:
-                songs = get_playlist_info(link,sp)
-
-            # pickle the songs list
-            # with open("songs.pkl", "wb") as f:
-            #     pickle.dump(songs, f)
-            # with open("songs.pkl", "rb") as f:
-            #     songs = pickle.load(f)
-            t.value = "Starting Download"
-            t.update()
-            downloaded = 0
-            song_name_list = []
-            if os.path.exists("song_names.txt"):
-                if input("only download the songs that are not already downloaded [y/n]: ").strip() == "y":  
-                    with open("song_names.txt", "r") as f:
-                        song_name_list = f.read().splitlines()
-            # check if downloaded.txt exists
-            # if os.path.exists("downloaded.txt"):
-            #     if input("Resume download? [y/n]: ").strip() == "y":  
-            #         with open("downloaded.txt", "r") as f:
-            #             downloaded = int(f.read())
-            totalVideoCount = len(songs)
-            for i, track_info in enumerate(songs):
+                custom_labels = {
+                    "Replace all": "RA",
+                    "Skip all": "SA",
+                    "Determine while downloading from CLI": "",
+                }
+                global file_exists_action 
+                file_exists_action = custom_labels[exists_action]
+                use_spotify_for_metadata = True
                 try:
-                    print("Downloading: "+track_info["track_title"])
-                    t2.value = f"{i+1}/{totalVideoCount}"
-                    pb.value = ((i+1)/totalVideoCount)
-                    t.value = "Downloading: "+track_info["track_title"]
-                    t.update()
-                    view.update()
-                    t2.update()
-                    pb.update()
-                    if track_info["track_title"] in song_name_list:
-                        continue
-                    if downloaded >= i:
-                        continue
-                    search_term = f"{track_info['artist_name']} {track_info['track_title']} audio"
-                    video_link = find_youtube(search_term)
-                    yt = YouTube(video_link)
-                    audio = download_yt(yt,search_term)
-                    if audio:
-                        # track_info["track_number"] = downloaded + 1
-                        set_metadata(track_info, audio)
-                        os.replace(audio, f"{music_folder_path}{os.path.basename(audio)}")
-                        downloaded += 1
-                        # save the downloaded count to a file
-                        with open("downloaded.txt", "w") as f:
-                            f.write(str(downloaded))
-                    # else:
-                        # print("File exists. Skipping...")
+                    load_dotenv()
+                    SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
+                    SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
+                    client_credentials_manager = SpotifyClientCredentials(
+                        client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET
+                    )
+                    sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
                 except Exception as e:
-                    print(f"Failed to download {track_info["track_title"]} due to: {e}")
-                    continue
-            t.value = "Downloaded"
-            t2.value = ""
-            t.update()
-            b.disabled = False
-            b.update()
-            print("All videos downloaded successfully!")
+                    use_spotify_for_metadata = False
+                    print(f"Failed to connect to Spotify API: {e}")
+                    print("Continuing without Spotify API, some song metadata will not be added")
+                    exception_popup = popup(page,f"⚠️ Failed to connect to Spotify API: {e}  .  Continuing without Spotify API, some song metadata will not be added")
+                    page.open(exception_popup)
+                # link = input("Enter YouTube Playlist URL: ✨")
+            
+                if "track" in link:
+                    songs = [get_track_info(link,sp)]
+                elif "playlist" in link:
+                    songs = get_playlist_info(link,sp)
+                else:
+                    songs = get_album_info(link,sp)
+                # pickle the songs list
+                # with open("songs.pkl", "wb") as f:
+                #     pickle.dump(songs, f)
+                # with open("songs.pkl", "rb") as f:
+                #     songs = pickle.load(f)
+                t.value = "Starting Download"
+                t.update()
+                downloaded = 0
+                song_name_list = []
+                if os.path.exists("song_names.txt"):
+                    if input("only download the songs that are not already downloaded [y/n]: ").strip() == "y":  
+                        with open("song_names.txt", "r") as f:
+                            song_name_list = f.read().splitlines()
+                # check if downloaded.txt exists
+                # if os.path.exists("downloaded.txt"):
+                #     if input("Resume download? [y/n]: ").strip() == "y":  
+                #         with open("downloaded.txt", "r") as f:
+                #             downloaded = int(f.read())
+                totalVideoCount = len(songs)
+                for i, track_info in enumerate(songs):
+                    try:
+                        if c1.value:
+                            if os.path.exists("failed_downloads.txt"):
+                                with open("failed_downloads.txt", "r") as f:
+                                    failed_songs = f.read().splitlines()
+                                if track_info["track_title"] not in failed_songs:
+                                    continue
+                        print("Downloading: "+track_info["track_title"])
+                        t2.value = f"{i+1}/{totalVideoCount}"
+                        pb.value = ((i+1)/totalVideoCount)
+                        t.value = "Downloading: "+track_info["track_title"]
+                        t.update()
+                        view.update()
+                        t2.update()
+                        pb.update()
+                        if track_info["track_title"] in song_name_list:
+                            continue
+                        if downloaded > i:
+                            continue
+                        search_term = f"{track_info['artist_name']} {track_info['track_title']} audio"
+                        video_link = find_youtube(search_term)
+                        yt = YouTube(video_link)
+                        audio = download_yt(yt,search_term)
+                        if audio:
+                            # track_info["track_number"] = downloaded + 1
+                            set_metadata(track_info, audio)
+                            os.replace(audio, f"{music_folder_path}{os.path.basename(audio)}")
+                            downloaded += 1
+                            # save the downloaded count to a file
+                            with open("downloaded.txt", "w") as f:
+                                f.write(str(downloaded))
+                        else:
+                            print("File exists. Skipping...")
+                    except Exception as e:
+                        tt = track_info["track_title"]
+                        print(f"Failed to download {tt} due to: {e}")
+                        with open("failed_downloads.txt", "a") as f:
+                            f.write(f"{tt}\n")
+                        continue
+                t.value = "Downloaded"
+                t2.value = ""
+                t.update()
+                b.disabled = False
+                b.update()
+                print("All videos downloaded successfully!")
+            except Exception as e:
+                print(e)
+                exception_popup = popup(page,f"⚠️ Failed to download. make sure all the options are properly selected, and the link is correct. restart and try again")
+                page.open(exception_popup)
         b = ft.ElevatedButton("Download Playlist", width=200000, on_click=button_clicked)
         view = ft.Container(
             
@@ -747,6 +834,7 @@ def main(page: ft.Page):
                     dd,
                     ft.Divider(opacity=0),
                     # ft.ElevatedButton(text="Download Playlist",width=200000),
+                    c1,
                     ft.Divider(opacity=0),
                     downloader(),
                     # ft.FilledButton("sp",on_click=switch_to_sp_tab)
@@ -757,7 +845,7 @@ def main(page: ft.Page):
         ),
         visible= True
     )
-    
+
     spotify_tab = ft.Container(
         ft.SafeArea(
             content=ft.Column(
@@ -765,13 +853,14 @@ def main(page: ft.Page):
                     ft.Divider(opacity=0, height= 20),
                     folder_picker,
                     ft.Divider(opacity=0, height= 20),
-                    ft.Text("Enter Spotify playlist url:"),
+                    ft.Text("Enter Spotify playlist or album url:"),
                     url,
                     ft.Divider(opacity=0),  
                     dd,
                     ft.Divider(opacity=0),
-                    # ft.ElevatedButton(text="Download Playlist",width=200000),
+                    c1,
                     ft.Divider(opacity=0),
+                    # ft.ElevatedButton(text="Download Playlist",width=200000),
                     downloader_spotify(),
                     # ft.FilledButton("yt",on_click=switch_to_yt_tab)
                     gesture_detector.detector,
