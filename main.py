@@ -33,6 +33,7 @@ import ssl
 
 # buffer = io.StringIO()
 # sys.stdout = sys.stderr = buffer
+
 ssl._create_default_https_context = ssl._create_unverified_context
 
 file_exists_action=""
@@ -290,6 +291,8 @@ def navigation_drawer():
         e.control.page.launch_url('https://www.patreon.com/c/Predacons')
     def github_page_launch(e):
         e.control.page.launch_url('https://github.com/shouryashashank/Trackster')
+    def email_page_launch(e):
+        e.control.page.launch_url('https://www.patreon.com/messages/ffd73e51aa264a61842c446763dbaff9?mode=campaign&tab=chats')
     def close_end_drawer(e):
         e.control.page.end_drawer = end_drawer
         end_drawer.open = False
@@ -311,6 +314,7 @@ def navigation_drawer():
                     spotify_client_secret,
                     ft.ElevatedButton("Save",on_click=save_app_settings),
                     ft.TextButton("How To Get Spotify api api Keys",on_click=yt_page_launch),
+                    # ft.TextButton("Contact support",on_click=email_page_launch),
                     ft.TextButton("Get version with api key already added.",on_click=petreon_page_launch),
                     ft.TextButton("Help me buy a new phone",on_click=petreon_page_launch),
                     ft.TextButton("See source code",on_click=github_page_launch)
@@ -796,7 +800,7 @@ def main(page: ft.Page):
                 print("All videos downloaded successfully!")
             except Exception as e:
                 print(e)
-                exception_popup = popup(page,f"⚠️ Failed to download. make sure all the options are properly selected, and the link is correct. restart and try again")
+                exception_popup = popup(page,f"⚠️ Failed to download. make sure all the options are properly selected, and the link is correct. restart and try again ({e})")
                 page.open(exception_popup)
         b = ft.ElevatedButton("Download Playlist", width=200000, on_click=button_clicked)
         view = ft.Container(
