@@ -17,7 +17,6 @@ import shutil
 import time
 import urllib.request
 import pickle
-import requests
 from tqdm import tqdm
 import spotipy
 from moviepy.editor import *
@@ -29,18 +28,25 @@ from rich.console import Console
 from spotipy.oauth2 import SpotifyClientCredentials
 from yarl import URL
 import ssl
-# import sys, io
+import sys, io
+from bs4 import BeautifulSoup
+import apple
+import yt_dlp
+from yt_dlp.utils import download_range_func
+from moviepy.editor import *
+
+
 
 # buffer = io.StringIO()
 # sys.stdout = sys.stderr = buffer
 
 ssl._create_default_https_context = ssl._create_unverified_context
-
+# pyinstaller --noconfirm --onefile --windowed --icon "D:\Code\github\music\Trackster\icon_for_an_app_called_trakster_used_to_download_spotify_and_youtube_playlist-removebg-preview.ico" --name "Trackster_101_Fix_Premium"  "D:\Code\github\music\Trackster\main.py"
 file_exists_action=""
 failed_download = False
 music_folder_path = "music-yt/"   # path to save the downloaded music
-# SPOTIPY_CLIENT_ID = "" # Spotify API client ID  # keep blank if you dont need spotify metadata
-# SPOTIPY_CLIENT_SECRET = ""  # Spotify API client secret
+SPOTIPY_CLIENT_ID = "c19397452f6c44a9b7ac04c4ddb2534b" # Spotify API client ID  # keep blank if you dont need spotify metadata
+SPOTIPY_CLIENT_SECRET = "cf8fcfca635b4f17b29fd129d7aaf663"  # Spotify API client secret
 
 def prompt_exists_action():
     """ask the user what happens if the file being downloaded already exists"""
@@ -78,39 +84,51 @@ def download_yt(yt,search_term):
         return False
 
     # download the music
-    max_retries = 3
-    attempt = 0
-    video = None
+    yt_opts = {
+        'extract_audio': True,
+        'format': 'bestaudio', 
+        'outtmpl': f"{music_folder_path}tmp/{yt.title}.mp4",
+        }
+    with yt_dlp.YoutubeDL(yt_opts) as ydl:
+        ydl.download(yt.watch_url)
+    # max_retries = 3
+    # attempt = 0
+    # video = None
 
-    while attempt < max_retries:
-        try:
-            video = yt.streams.filter(only_audio=True).first()
-            if video:
-                break
-        except Exception as e:
-            print(f"Attempt {attempt + 1}  {search_term} failed due to: {e}")
-            attempt += 1
-    if not video:
-        print(f"Failed to download {search_term}")
-        # check if a file named failed_downloads.txt exists if not create one and append the failed download
-        if not os.path.exists("failed_downloads.txt"):
-            with open("failed_downloads.txt", "w") as f:
-                f.write(f"{search_term}\n")
-        else:
-            with open("failed_downloads.txt", "a") as f:
-                f.write(f"{search_term}\n")
-        return False
-    vid_file = video.download(output_path=f"{music_folder_path}tmp")
-    # convert the downloaded video to mp3
-    base = os.path.splitext(vid_file)[0]
-    audio_file = base + ".mp3"
-    mp4_no_frame = AudioFileClip(vid_file)
-    mp4_no_frame.write_audiofile(audio_file, logger=None)
-    mp4_no_frame.close()
-    os.remove(vid_file)
-    os.replace(audio_file, f"{music_folder_path}tmp/{yt.title}.mp3")
+    # while attempt < max_retries:
+    #     try:
+    #         video = yt.streams.filter(only_audio=True).first()
+    #         if video:
+    #             break
+    #     except Exception as e:
+    #         print(f"Attempt {attempt + 1}  {search_term} failed due to: {e}")
+    #         attempt += 1
+    # if not video:
+    #     print(f"Failed to download {search_term}")
+    #     # check if a file named failed_downloads.txt exists if not create one and append the failed download
+    #     if not os.path.exists("failed_downloads.txt"):
+    #         with open("failed_downloads.txt", "w") as f:
+    #             f.write(f"{search_term}\n")
+    #     else:
+    #         with open("failed_downloads.txt", "a") as f:
+    #             f.write(f"{search_term}\n")
+    #     return False
+    # vid_file = video.download(output_path=f"{music_folder_path}tmp")
+    # # convert the downloaded video to mp3
+    # base = os.path.splitext(vid_file)[0]
+    # audio_file = base + ".mp3"
+    # mp4_no_frame = AudioFileClip(vid_file)
+    # mp4_no_frame.write_audiofile(audio_file, logger=None)
+    # mp4_no_frame.close()
+    # os.remove(vid_file)
+    # os.replace(audio_file, f"{music_folder_path}tmp/{yt.title}.mp3")
+    video_file = f"{music_folder_path}tmp/{yt.title}.mp4"
     audio_file = f"{music_folder_path}tmp/{yt.title}.mp3"
-
+    FILETOCONVERT = AudioFileClip(video_file)
+    FILETOCONVERT.write_audiofile(audio_file)
+    FILETOCONVERT.close()
+    os.remove(video_file)
+    audio_file = f"{music_folder_path}tmp/{yt.title}.mp3"
     return audio_file
 
 def set_metadata(metadata, file_path):
@@ -301,21 +319,21 @@ def navigation_drawer():
         ft.SafeArea(
             ft.Column(
                 [
-                    ft.Row(
-                        [
-                            ft.Text(""),
-                            ft.IconButton(icon=ft.icons.CLOSE,on_click=close_end_drawer)
-                        ],
-                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN
-                    ),
-                    ft.Text("Spotify client id:"),
-                    spotify_client_id,
-                    ft.Text("Spotify client secret:"),
-                    spotify_client_secret,
-                    ft.ElevatedButton("Save",on_click=save_app_settings),
-                    ft.TextButton("How To Get Spotify api api Keys",on_click=yt_page_launch),
-                    # ft.TextButton("Contact support",on_click=email_page_launch),
-                    ft.TextButton("Get version with api key already added.",on_click=petreon_page_launch),
+                    # ft.Row(
+                    #     [
+                    #         ft.Text(""),
+                    #         ft.IconButton(icon=ft.icons.CLOSE,on_click=close_end_drawer)
+                    #     ],
+                    #     alignment=ft.MainAxisAlignment.SPACE_BETWEEN
+                    # ),
+                    # ft.Text("Spotify client id:"),
+                    # spotify_client_id,
+                    # ft.Text("Spotify client secret:"),
+                    # spotify_client_secret,
+                    # ft.ElevatedButton("Save",on_click=save_app_settings),
+                    # ft.TextButton("How To Get Spotify api api Keys",on_click=yt_page_launch),
+                    ft.TextButton("Contact support",on_click=email_page_launch),
+                    # ft.TextButton("Get version with api key already added.",on_click=petreon_page_launch),
                     ft.TextButton("Help me buy a new phone",on_click=petreon_page_launch),
                     ft.TextButton("See source code",on_click=github_page_launch)
 
@@ -365,11 +383,14 @@ def handle_nav_change(e):
         switch_to_yt_tab(e)
     elif e.control.selected_index == 1:
         switch_to_sp_tab(e)
+    elif e.control.selected_index == 2:
+        switch_to_am_tab(e)
 def nav_bar():
     view = ft.NavigationBar(
         destinations=[
             ft.NavigationBarDestination(icon=ft.icons.ONDEMAND_VIDEO_ROUNDED, label="Youtube"),
-            ft.NavigationBarDestination(icon=ft.icons.MUSIC_NOTE, label="Spotify")
+            ft.NavigationBarDestination(icon=ft.icons.MUSIC_NOTE, label="Spotify"),
+            ft.NavigationBarDestination(icon=ft.icons.APPLE_OUTLINED, label="Apple Music")
             
         ],
         on_change=handle_nav_change,
@@ -399,6 +420,7 @@ def switch_to_yt_tab(e):
     set_theme(e,"Red")
     e.control.page.youtube_tab.visible = True
     e.control.page.spotify_tab.visible = False
+    e.control.page.apple_music_tab.visible = False
     e.control.page.navigation_bar.selected_index = 0
     e.control.page.update()
 
@@ -407,7 +429,17 @@ def switch_to_sp_tab(e):
     set_theme(e,"Green")
     e.control.page.youtube_tab.visible = False
     e.control.page.spotify_tab.visible = True
+    e.control.page.apple_music_tab.visible = False
     e.control.page.navigation_bar.selected_index = 1
+    e.control.page.update()
+
+def switch_to_am_tab(e):
+    e.control.page.title= "Apple Music"
+    set_theme(e,"Blue")
+    e.control.page.youtube_tab.visible = False
+    e.control.page.spotify_tab.visible = False
+    e.control.page.apple_music_tab.visible = True
+    e.control.page.navigation_bar.selected_index = 2
     e.control.page.update()
 
 def get_track_info(track_url,sp):
@@ -597,8 +629,8 @@ def main(page: ft.Page):
                 use_spotify_for_metadata = True
                 try:
                     load_dotenv()
-                    SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
-                    SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
+                    # SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
+                    # SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
                     client_credentials_manager = SpotifyClientCredentials(
                         client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET
                     )
@@ -713,8 +745,8 @@ def main(page: ft.Page):
                 use_spotify_for_metadata = True
                 try:
                     load_dotenv()
-                    SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
-                    SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
+                    # SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
+                    # SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
                     client_credentials_manager = SpotifyClientCredentials(
                         client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET
                     )
@@ -825,6 +857,125 @@ def main(page: ft.Page):
                 ],)
         )
         return view
+    
+    def downloader_apple_music():
+        try:
+            t = ft.Text(value="")
+            t2 = ft.Text(value = "0")
+            pb = ft.ProgressBar(value=0)
+            def button_clicked(e):
+                link = url.value
+                exists_action = dd.value
+                t.value = "Downloading"
+                t.update()
+                b.disabled = True
+                b.update()
+                custom_labels = {
+                    "Replace all": "RA",
+                    "Skip all": "SA",
+                    "Determine while downloading from CLI": "",
+                }
+                global file_exists_action 
+                file_exists_action = custom_labels[exists_action]
+                use_spotify_for_metadata = True
+                try:
+                    load_dotenv()
+                    # SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
+                    # SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
+                    client_credentials_manager = SpotifyClientCredentials(
+                        client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET
+                    )
+                    sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
+                except Exception as e:
+                    use_spotify_for_metadata = False
+                    print(f"Failed to connect to Spotify API: {e}")
+                    print("Continuing without Spotify API, some song metadata will not be added")
+                    exception_popup = popup(page,f"⚠️ Failed to connect to Spotify API: {e}  .  Continuing without Spotify API, some song metadata will not be added")
+                    page.open(exception_popup)
+                # link = input("Enter YouTube Playlist URL: ✨")
+
+                am_playlist = apple.get_playlist(link)
+
+
+
+                totalVideoCount = len(am_playlist)
+                print("Total songs in playlist:", totalVideoCount)
+
+                for index, song in enumerate(am_playlist):
+                    try:
+                        if c1.value:
+                            if os.path.exists("failed_downloads.txt"):
+                                with open("failed_downloads.txt", "r") as f:
+                                    failed_songs = f.read().splitlines()
+                                if song not in failed_songs:
+                                    continue
+                        print("Downloading: "+song)
+                        t2.value = f"{index+1}/{totalVideoCount}"
+                        pb.value = ((index+1)/totalVideoCount)
+                        
+                        view.update()
+                        t2.update()
+                        pb.update()
+                        video_link = find_youtube(song)
+                        yt = YouTube(video_link)
+                        audio = download_yt(yt,song)
+                        if audio:
+                            if(use_spotify_for_metadata):
+                                try:
+                                    spotify_search_term = song.replace(" by", "").replace(" audio", "")
+                                    track_url = search_spotify(spotify_search_term,sp)
+                                except Exception as e:
+                                    print(e)
+                                    track_url = None
+                                if not track_url:
+                                    track_info = get_track_info_youtube(yt)
+                                else:
+                                    track_info = get_track_info_spotify(track_url,sp)
+                            else:
+                                track_info = get_track_info_youtube(yt)
+
+                            set_metadata(track_info, audio)
+                            os.replace(audio, f"{music_folder_path}{os.path.basename(audio)}")
+                    except Exception as e:
+                        print(f"Failed to download {song} due to: {e}")
+                        with open("failed_downloads.txt", "a") as f:
+                            f.write(f"{song}\n")
+                        continue
+                t.value = "Downloaded"
+                t2.value = ""
+                t.update()
+                b.disabled = False
+                b.update()
+                print("All videos downloaded successfully!")
+            b = ft.ElevatedButton("Download Playlist", width=200000, on_click=button_clicked)
+            view = ft.Container(
+                
+                content = ft.Column(
+                    [
+                        b,
+                        ft.Container(
+                            # image_src=img,
+                            # image_opacity= 0,
+                            # image_fit= ft.ImageFit.COVER,
+                            padding=10,
+                            content=ft.Column([
+                                ft.Divider(opacity=0),
+                                t, 
+                                pb,
+                                t2,
+                                ft.Divider(opacity=0)]),
+                                
+                            )
+                        
+                    ],)
+            )
+            return view
+            # return "All videos downloaded successfully!"
+        except Exception as e:
+            print(e)
+            exception_popup = popup(page,f"⚠️ Failed to download. make sure all the options are properly selected, and the link is correct. restart and try again")
+            page.open(exception_popup)
+
     youtube_tab = ft.Container(
         ft.SafeArea(
             content=ft.Column(
@@ -873,12 +1024,36 @@ def main(page: ft.Page):
         ),
         visible= False
     )
+    apple_music_tab = ft.Container(
+        ft.SafeArea(
+            content=ft.Column(
+                [
+                    ft.Divider(opacity=0, height= 20),
+                    folder_picker,
+                    ft.Divider(opacity=0, height= 20),
+                    ft.Text("Enter Apple Music playlist or album url:"),
+                    url,
+                    ft.Divider(opacity=0),  
+                    dd,
+                    ft.Divider(opacity=0),
+                    c1,
+                    ft.Divider(opacity=0),
+                    # ft.ElevatedButton(text="Download Playlist",width=200000),
+                    downloader_apple_music(),
+                    # ft.FilledButton("yt",on_click=switch_to_yt_tab)
+                    gesture_detector.detector,
+                ]
+            )
+        ),
+        visible= False
+    )
     page.spotify_tab=spotify_tab
     page.youtube_tab = youtube_tab
+    page.apple_music_tab = apple_music_tab
     page.overlay.extend([ get_directory_dialog])
     
     page.add(
-        youtube_tab,spotify_tab
+        youtube_tab,spotify_tab,apple_music_tab
     )
     for i in range(0, 101):
             pb.value = i * 0.01
