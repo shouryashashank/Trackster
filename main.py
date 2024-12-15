@@ -45,8 +45,8 @@ ssl._create_default_https_context = ssl._create_unverified_context
 file_exists_action=""
 failed_download = False
 music_folder_path = "music-yt/"   # path to save the downloaded music
-SPOTIPY_CLIENT_ID = "c19397452f6c44a9b7ac04c4ddb2534b" # Spotify API client ID  # keep blank if you dont need spotify metadata
-SPOTIPY_CLIENT_SECRET = "cf8fcfca635b4f17b29fd129d7aaf663"  # Spotify API client secret
+SPOTIPY_CLIENT_ID = "" # Spotify API client ID  # keep blank if you dont need spotify metadata
+SPOTIPY_CLIENT_SECRET = ""  # Spotify API client secret
 
 def prompt_exists_action():
     """ask the user what happens if the file being downloaded already exists"""
