@@ -55,8 +55,8 @@ search_base_url = "https://www.jiosaavn.com/api.php?__call=autocomplete.get&_for
 song_base_url = "https://www.jiosaavn.com/api.php?__call=song.getDetails&cc=in&_marker=0%3F_marker%3D0&_format=json&pids="
 lyrics_base_url = "https://www.jiosaavn.com/api.php?__call=lyrics.getLyricvideo_files&ctx=web6dot0&api_version=4&_format=json&_marker=0%3F_marker%3D0&lyrics_id="
 music_folder_path = "music-yt/"   # path to save the downloaded music
-SPOTIPY_CLIENT_ID = "" # Spotify API client ID  # keep blank if you dont need spotify metadata
-SPOTIPY_CLIENT_SECRET = ""  # Spotify API client secret
+# SPOTIPY_CLIENT_ID = "" # Spotify API client ID  # keep blank if you dont need spotify metadata
+# SPOTIPY_CLIENT_SECRET = ""  # Spotify API client secret
 
 def sanitize_filename(filename):
     return re.sub(r'[<>:"/\\|?*]', '', filename)
@@ -441,21 +441,21 @@ def navigation_drawer():
         ft.SafeArea(
             ft.Column(
                 [
-                    # ft.Row(
-                    #     [
-                    #         ft.Text(""),
-                    #         ft.IconButton(icon=ft.icons.CLOSE,on_click=close_end_drawer)
-                    #     ],
-                    #     alignment=ft.MainAxisAlignment.SPACE_BETWEEN
-                    # ),
-                    # ft.Text("Spotify client id:"),
-                    # spotify_client_id,
-                    # ft.Text("Spotify client secret:"),
-                    # spotify_client_secret,
-                    # ft.ElevatedButton("Save",on_click=save_app_settings),
-                    # ft.TextButton("How To Get Spotify api api Keys",on_click=yt_page_launch),
+                    ft.Row(
+                        [
+                            ft.Text(""),
+                            ft.IconButton(icon=ft.icons.CLOSE,on_click=close_end_drawer)
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN
+                    ),
+                    ft.Text("Spotify client id:"),
+                    spotify_client_id,
+                    ft.Text("Spotify client secret:"),
+                    spotify_client_secret,
+                    ft.ElevatedButton("Save",on_click=save_app_settings),
+                    ft.TextButton("How To Get Spotify api api Keys",on_click=yt_page_launch),
                     ft.TextButton("Contact support",on_click=email_page_launch),
-                    # ft.TextButton("Get version with api key already added.",on_click=petreon_page_launch),
+                    ft.TextButton("Get version with api key already added.",on_click=petreon_page_launch),
                     ft.TextButton("Help me buy a new phone",on_click=petreon_page_launch),
                     ft.TextButton("See source code",on_click=github_page_launch)
 
@@ -711,6 +711,7 @@ def main(page: ft.Page):
     pb = ft.ProgressBar()
     c1 = ft.Checkbox(label="Download only failed songs", value=False)
     c2 = ft.Checkbox(label="Download high quality audio", value=False)
+    # c2 = ft.Checkbox(label="Download high quality audio (🙏 please get it from petreon or build from source to eneble this)", value=False,disabled=True)
     # def switch_to_yt_tab(e):
     #     page.title= "Youtube"
     #     youtube_tab.visible = True
@@ -759,8 +760,8 @@ def main(page: ft.Page):
                 use_spotify_for_metadata = True
                 try:
                     load_dotenv()
-                    # SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
-                    # SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
+                    SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
+                    SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
                     client_credentials_manager = SpotifyClientCredentials(
                         client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET
                     )
@@ -858,9 +859,10 @@ def main(page: ft.Page):
         t2 = ft.Text(value = "0")
         pb = ft.ProgressBar(value=0)
         def button_clicked(e):
+            print("Downloading: here you will se a progress bar. if that progress bar is stuck that means, spotify is rate limiting you. wait for a while and try again or download the 'no spotify key' version. for now there is no work around this. sorry for the inconvenience")
             link = url.value
             exists_action = dd.value
-            t.value = "Fetching Playlist meta data (dont freak out if it takes a while 😅 it will take about a minute for 100 songs)"
+            t.value = "Fetching Playlist meta data (dont freak out if it takes a while 😅 it will take about a minute for 300 songs)"
             t.update()
             b.disabled = True
             b.update()
@@ -875,8 +877,8 @@ def main(page: ft.Page):
                 use_spotify_for_metadata = True
                 try:
                     load_dotenv()
-                    # SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
-                    # SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
+                    SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
+                    SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
                     client_credentials_manager = SpotifyClientCredentials(
                         client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET
                     )
@@ -960,9 +962,9 @@ def main(page: ft.Page):
                             else:
                                 artist = song['primary_artists']
                                 # compare the artist name from the song and the artist name from the track_info
-                                if (difflib.SequenceMatcher(None, artist.lower(), track_info["artist_name"].lower()).ratio()<0.6):
+                                if (difflib.SequenceMatcher(None, artist.lower(), track_info["artist_name"].lower()).ratio()<0.4):
                                     try:
-                                        print("No songs found for the query in high quality song server." , search_term)
+                                        print("songs found for the query in high quality song server. very different from the one in spotify" , search_term)
                                         print("Trying to download from youtube")
                                         video_link = find_youtube(search_term)
                                         yt = YouTube(video_link)
@@ -1011,7 +1013,14 @@ def main(page: ft.Page):
                 t.update()
                 b.disabled = False
                 b.update()
-                print("All videos downloaded successfully!")
+                print("All songs downloaded successfully!")
+                print("Few more steps to go. 🚀")
+                print("1. Open the downloaded folder and check if all the songs are downloaded.")
+                print("2. open mismatched_downloads.txt and check if any songs are mismatched. most of them should be fine but still manually check the songs. if it is not the song you wanted, delete the song from the folder.")
+                print("3. restart the app and download again but with high quality audio turned off. this will download the songs from youtube. make sure to select skip all in the song exist action dropdown.")
+                print("4. open failed_downloads.txt and download the songs that are failed to download.")
+                completion_popup = popup(page,"All songs downloaded successfully!\n Few more steps to go. 🚀 \n1. Open the downloaded folder and check if all the songs are downloaded. \n2. open mismatched_downloads.txt and check if any songs are mismatched. most of them should be fine but still manually check the songs. if it is not the song you wanted, delete the song from the folder.\n3. restart the app and download again but with high quality audio turned off. this will download the songs from youtube. make sure to select skip all in the song exist action dropdown.")
+                page.open(completion_popup)
             except Exception as e:
                 print(e)
                 exception_popup = popup(page,f"⚠️ Failed to download. make sure all the options are properly selected, and the link is correct. restart and try again ({e})")
@@ -1046,9 +1055,10 @@ def main(page: ft.Page):
             t2 = ft.Text(value = "0")
             pb = ft.ProgressBar(value=0)
             def button_clicked(e):
+                
                 link = url.value
                 exists_action = dd.value
-                t.value = "Downloading"
+                t.value = "Fetching Playlist meta data (dont freak out if it takes a while 😅 it will take about a minute for 100 songs)"
                 t.update()
                 b.disabled = True
                 b.update()
@@ -1062,8 +1072,8 @@ def main(page: ft.Page):
                 use_spotify_for_metadata = True
                 try:
                     load_dotenv()
-                    # SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
-                    # SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
+                    SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
+                    SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
                     client_credentials_manager = SpotifyClientCredentials(
                         client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET
                     )
@@ -1087,8 +1097,8 @@ def main(page: ft.Page):
                     try:
                         #  check if the song is already downloaded at  f"{music_folder_path}{search_term}.mp3" 
                         if dd.value == "Skip all":
-                            if os.path.exists(f"{music_folder_path}{track_info['track_title']}.mp3"):
-                                print("Skipping: "+track_info["track_title"])
+                            if os.path.exists(f"{music_folder_path}{song}.mp3"):
+                                print("Skipping: "+song)
                                 continue
                         if c1.value:
                             if os.path.exists("failed_downloads.txt"):
@@ -1153,7 +1163,14 @@ def main(page: ft.Page):
                 t.update()
                 b.disabled = False
                 b.update()
-                print("All videos downloaded successfully!")
+                print("All songs downloaded successfully!")
+                print("Few more steps to go. 🚀")
+                print("1. Open the downloaded folder and check if all the songs are downloaded.")
+                print("2. some songs downloaded from the high quality audio server might not be the song you wanted. please check the songs manually and delete the songs that are not the song you wanted.")
+                print("3. restart the app and download again but with high quality audio turned off. this will download the songs from youtube. make sure to select skip all in the song exist action dropdown.")
+                print("4. open failed_downloads.txt and download the songs that are failed to download.")
+                completion_popup = popup(page,"All songs downloaded successfully!\n Few more steps to go. 🚀 \n1. Open the downloaded folder and check if all the songs are downloaded. \n2. some songs downloaded from the high quality audio server might not be the song you wanted. please check the songs manually and delete the songs that are not the song you wanted.\n3. restart the app and download again but with high quality audio turned off. this will download the songs from youtube. make sure to select skip all in the song exist action dropdown.")
+                page.open(completion_popup)
             b = ft.ElevatedButton("Download Playlist", width=200000, on_click=button_clicked)
             view = ft.Container(
                 
@@ -1243,7 +1260,7 @@ def main(page: ft.Page):
                     ft.Divider(opacity=0),  
                     dd,
                     ft.Divider(opacity=0),
-                    c1,
+                    ft.Row([c1,c2]),
                     ft.Divider(opacity=0),
                     # ft.ElevatedButton(text="Download Playlist",width=200000),
                     downloader_apple_music(),
