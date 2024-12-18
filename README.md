@@ -1,15 +1,16 @@
 # 🎵 Trackster 🎵
 
-Welcome to **Trackster**! Trackster is a funky Flet app that allows you to download playlists from Spotify and YouTube. 🎧✨
+Welcome to **Trackster**! Trackster is a funky Flet app that allows you to download playlists from Spotify, Apple Music and YouTube. 🎧✨
 
 ## Features
-- 📥 Download entire playlists from YouTube and Spotify.
+- 📥 Download entire playlists from YouTube, Apple Music and Spotify.
 - 🎨 User-friendly interface with a cool progress bar.
 - 🖼️ Automatically adds metadata and album art to your downloaded tracks.
 - 🔍 Search for tracks on Spotify and YouTube.
 - 🛠️ Customizable settings for file handling.
+- 🎚️ 320kbps hi-res music download
 
-<img src="https://github.com/user-attachments/assets/7e98cdb5-61f2-48bb-a2cb-b6d45ffee827" width="400"> <img src="https://github.com/user-attachments/assets/084acca0-9ef8-4e8e-81f0-cc84d9effeab" width="400"> <img src="ttps://github.com/user-attachments/assets/5e5d78fa-f740-4b40-9478-d3da2eaacafb" width="400">
+<img src="https://github.com/user-attachments/assets/7e98cdb5-61f2-48bb-a2cb-b6d45ffee827" width="300"> <img src="https://github.com/user-attachments/assets/084acca0-9ef8-4e8e-81f0-cc84d9effeab" width="300"> <img src="https://github.com/user-attachments/assets/c351fc7a-5c31-4555-86c6-ea6018bad9d5" width="300"> 
 
 ## How to Run the App
 
