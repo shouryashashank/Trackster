@@ -34,14 +34,14 @@ Welcome to **Trackster**! Trackster is a funky Flet app that allows you to downl
 ### Option 2: Download Executable
 1. Go to the [Releases](https://github.com/shouryashashank/Trackster/releases) page.
 2. Download the latest executable file for your operating system.
-    - **Trackster.exe**: Use this for regular downloads.
-    - **Trackster_debug.exe**: Use this when downloading from playlists containing more than 500 songs, as it helps manage songs that fail to download due to connection issues.
-
 3. Run the downloaded executable file to start the app.
 
-### Supported Platforms
+## Additional requirements
+* ffmpeg is now required for the mp3 conversion
+   
+## Supported Platforms
 - Currently supported: **Windows**, **Linux**
-- Coming soon: **Android**
+- Coming soon: **Android**,**Mac**
 
 **Help Needed**: If you can help compile Trackster for macOS and iOS, please reach out or contribute to the project. Your assistance would be greatly appreciated!
 
