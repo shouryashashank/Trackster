@@ -9,7 +9,7 @@ Welcome to **Trackster**! Trackster is a funky Flet app that allows you to downl
 - 🔍 Search for tracks on Spotify and YouTube.
 - 🛠️ Customizable settings for file handling.
 
-<img src="https://github.com/user-attachments/assets/7e98cdb5-61f2-48bb-a2cb-b6d45ffee827" width="400"> <img src="https://github.com/user-attachments/assets/084acca0-9ef8-4e8e-81f0-cc84d9effeab" width="400">
+<img src="https://github.com/user-attachments/assets/7e98cdb5-61f2-48bb-a2cb-b6d45ffee827" width="400"> <img src="https://github.com/user-attachments/assets/084acca0-9ef8-4e8e-81f0-cc84d9effeab" width="400"> <img src="ttps://github.com/user-attachments/assets/5e5d78fa-f740-4b40-9478-d3da2eaacafb" width="400">
 
 ## How to Run the App
 
