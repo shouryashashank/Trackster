@@ -1,6 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
 import re
+import tqdm
 
 def get_song_details(link):
     try:
@@ -12,7 +13,6 @@ def get_song_details(link):
         if title:
             content = title.get('content')
             content = content.replace("on AppleÂ\xa0Music", "audio")
-            print(content)
             return content
         else:
             print("No meta tag found")
@@ -33,7 +33,7 @@ def get_playlist(url):
 
         applelinks = soup.find_all('meta', attrs={"property": "music:song"})
         song_list = []
-        for link in enumerate(applelinks):
+        for link in tqdm.tqdm(enumerate(applelinks), total=len(applelinks), desc="Processing songs"):
             link_str = str(link[1])
             match = re.search(r'content="(https?://[^"]+)"', link_str)
             if match:
