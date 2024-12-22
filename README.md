@@ -17,7 +17,7 @@ Welcome to **Trackster**! Trackster is a funky Flet app that allows you to downl
 ### Option 1: Run from Source
 1. Clone the repository:
     ```sh
-    git clone https://github.com/yourusername/Trackster.git
+    git clone https://github.com/shouryashashank/Trackster.git
     cd Trackster
     ```
 
