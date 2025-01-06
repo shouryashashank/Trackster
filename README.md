@@ -62,7 +62,7 @@ You can add your Spotify API keys through the app's settings:
 
 ## Disclaimer
 **Support the Artists**: This tool is intended for personal use only. Please support the artists by purchasing their music or streaming it through official channels. 💖🎶
-
+if you use this software obtained from any source it is preasumed that you own the music you are downloading
 ---
 
 Enjoy your music with Trackster! 🎉🎵
