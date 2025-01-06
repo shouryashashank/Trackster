@@ -61,8 +61,9 @@ You can add your Spotify API keys through the app's settings:
 - **No Proper Continue Option**: You can pause and resume downloads by restarting the app, but it takes some time to re-initiate and could be improved.
 
 ## Disclaimer
-**Support the Artists**: This tool is intended for personal use only. Please support the artists by purchasing their music or streaming it through official channels. 💖🎶
-if you use this software obtained from any source it is preasumed that you own the music you are downloading
+**Support the Artists** : This tool is intended for personal use only. Please support the artists by purchasing their music or streaming it through official channels. 💖🎶
+
+- if you use this software obtained from any source it is preasumed that you own the music you are downloading
 ---
 
 Enjoy your music with Trackster! 🎉🎵
