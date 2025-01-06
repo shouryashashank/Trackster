@@ -40,10 +40,10 @@ Welcome to **Trackster**! Trackster is a funky Flet app that allows you to downl
 * ffmpeg is now required for the mp3 conversion
    
 ## Supported Platforms
-- Currently supported: **Windows**, **Linux**
-- Coming soon: **Android**,**Mac**
+- Currently supported: **Windows**, **Linux**, **Mac**
+- Coming soon: **Android**
 
-**Help Needed**: If you can help compile Trackster for macOS and iOS, please reach out or contribute to the project. Your assistance would be greatly appreciated!
+**Help Needed**: If you can help compile Trackster for iOS, please reach out or contribute to the project. Your assistance would be greatly appreciated!
 
 ## Usage
 1. **Select Output Directory**: Choose the folder where you want to save your downloaded music.
