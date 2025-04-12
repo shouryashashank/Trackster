@@ -564,35 +564,51 @@ def switch_to_am_tab(e):
     e.control.page.navigation_bar.selected_index = 2
     e.control.page.update()
 
-def get_track_info(track_url,sp):
+def get_track_info(track_url, sp, max_retries=3, initial_timeout=1):
+    """
+    Get track metadata from Spotify with retry logic for timeouts.
     
-    # res = requests.get(track_url)
-    # if res.status_code != 200:
-    #     # retry 3 times
-    #     for i in range(3):
-    #         res = requests.get(track_url)
-    #         if res.status_code == 200:
-    #             break
-    # if res.status_code != 200:
-    #     print("Invalid Spotify track URL")
-    try:
-        track = sp.track(track_url)
+    Args:
+        track_url (str): Spotify track URL
+        sp: Authenticated Spotipy client
+        max_retries (int): Maximum number of retry attempts
+        initial_timeout (float): Initial timeout between retries in seconds (will exponentially increase)
+    
+    Returns:
+        dict: Track metadata or None if all attempts fail
+    """
+    last_exception = None
+    
+    for attempt in range(max_retries + 1):  # +1 for the initial attempt
+        try:
+            track = sp.track(track_url)
+            isrc = track["external_ids"].get("isrc") if track.get("external_ids") else None
 
-        track_metadata = {
-            "artist_name": track["artists"][0]["name"],
-            "track_title": track["name"],
-            "track_number": track["track_number"],
-            "isrc": track["external_ids"]["isrc"],
-            "album_art": track["album"]["images"][1]["url"],
-            "album_name": track["album"]["name"],
-            "release_date": track["album"]["release_date"],
-            "artists": [artist["name"] for artist in track["artists"]],
-        }
-    except Exception as e:
-        print("Invalid Spotify track URL")
+            track_metadata = {
+                "artist_name": track["artists"][0]["name"],
+                "track_title": track["name"],
+                "track_number": track["track_number"],
+                "isrc": isrc,
+                "album_art": track["album"]["images"][1]["url"],
+                "album_name": track["album"]["name"],
+                "release_date": track["album"]["release_date"],
+                "artists": [artist["name"] for artist in track["artists"]],
+            }
+            
+            return track_metadata
+            
+        except Exception as e:
+            last_exception = e
+            if attempt < max_retries:
+                wait_time = initial_timeout * (2 ** attempt)  # Exponential backoff
+                print(f"Attempt {attempt + 1} failed. Retrying in {wait_time} seconds... Error: {str(e)}")
+                time.sleep(wait_time)
+            continue
+    
+    # If we get here, all attempts failed
+    print(f"Failed to get track info after {max_retries + 1} attempts. Last error: {str(last_exception)}")
+    return None
 
-
-    return track_metadata
 def find_youtube(query):
     query = query.replace("é", "e")
     query = query.replace("’", "")
@@ -647,18 +663,30 @@ def get_playlist_info(sp_playlist,sp):
         with open("synced.txt", "r") as f:
             track_id = f.read().splitlines()
     updated_tracks = []
-    for track in tqdm(tracks):
-        updated_tracks.append(track["id"])
-        if track["id"] in track_id:
-            continue
-        track_url = f"https://open.spotify.com/track/{track['id']}"
-        track_info = get_track_info(track_url,sp)
-        # make a progress bar
-        
-        tracks_info.append(track_info)
+    try:
+        for track in tqdm(tracks):
+            # check if the track['id'] is not none
+            if track["id"] is None:
+                continue
+
+            if track["id"] in track_id:
+                continue
+            
+            updated_tracks.append(track["id"])
+
+            track_url = f"https://open.spotify.com/track/{track['id']}"
+            track_info = get_track_info(track_url,sp)
+            # make a progress bar
+            
+            tracks_info.append(track_info)
+    except Exception as e:
+        print(f"Failed to get track info for {track['name']} due to: {e}")
     # save the updated tracks_id to synced_updated.txt
-    with open("synced_updated.txt", "w") as f:
-        f.write("\n".join(updated_tracks))
+    try:
+        with open("synced_updated.txt", "w") as f:
+            f.write("\n".join(updated_tracks))
+    except Exception as e:
+        print(f"Failed to save updated tracks: {e}")
     return tracks_info
 
 def get_album_info(sp_album,sp):
