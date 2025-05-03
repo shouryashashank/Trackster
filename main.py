@@ -159,18 +159,37 @@ def search_song(query):
     if not songs:
         return "No songs found for the query."
     song_id = response.json()['songs']['data'][0]['id']
-    song_url = song_base_url + song_id
-    response = requests.get(song_url)
-    song_url = response.json()[song_id]['encrypted_media_url']
-    primary_artists = response.json()[song_id]['primary_artists']
-    album = response.json()[song_id]['album']
-    song = response.json()[song_id]['song']
-    release_date = response.json()[song_id]['release_date']
+    best_diff = 0
+    best_song_id = song_id
 
-    has_lyrics = response.json()[song_id]['has_lyrics'] == 'true'
+    for song_data in songs:
+        try:
+            song_id = song_data['id']
+            output_query = f"{song_data['title']} {song_data['more_info']['primary_artists']} {song_data['album']}"
+            diff_ratio = difflib.SequenceMatcher(None, query.lower(), output_query.lower()).ratio()
+            if diff_ratio > best_diff:
+                best_diff = diff_ratio
+                best_song_id = song_id
+            if diff_ratio == 1:
+                break
+        except Exception as e:
+            print(f"Error processing song data: {e}")
+
+    if not best_song_id:
+        return "No suitable song found."
+    
+    song_url = song_base_url + best_song_id
+    response = requests.get(song_url)
+    song_url = response.json()[best_song_id]['encrypted_media_url']
+    primary_artists = response.json()[best_song_id]['primary_artists']
+    album = response.json()[best_song_id]['album']
+    song = response.json()[best_song_id]['song']
+    release_date = response.json()[best_song_id]['release_date']
+
+    has_lyrics = response.json()[best_song_id]['has_lyrics'] == 'true'
     lyrics = ""
     if has_lyrics:
-        lyrics_url = lyrics_base_url + song_id
+        lyrics_url = lyrics_base_url + best_song_id
         try:
             lyrics_response = requests.get(lyrics_url)
             lyrics = lyrics_response.json()['lyrics']
@@ -970,9 +989,10 @@ def main(page: ft.Page):
                         if downloaded > i:
                             continue
                         search_term = f"{track_info['artist_name']} {track_info['track_title']} audio"
+                        hq_search_term = f"{track_info['track_title']} {track_info['artist_name']} {track_info['album_name']}"
                         lyrics = ""
                         if c2.value:
-                            song = download_high_quality(search_term)
+                            song = download_high_quality(hq_search_term)
                             if song == "No songs found for the query.":
                                 try:
                                     print("No songs found for the query in high quality song server." , search_term)
@@ -988,9 +1008,10 @@ def main(page: ft.Page):
                                     print("Skipping... adding to failed_downloads.txt redownload with low quality in next run" )
                                     continue
                             else:
-                                artist = song['primary_artists']
+                                artist = song['song'] + " " + song['primary_artists'] + " " + song['album']
+                                diff_ratio = difflib.SequenceMatcher(None, artist.lower(), (track_info['track_title'] + " " +track_info["artist_name"]+ " " +track_info["album_name"]).lower()).ratio()
                                 # compare the artist name from the song and the artist name from the track_info
-                                if (difflib.SequenceMatcher(None, artist.lower(), track_info["artist_name"].lower()).ratio()<0.4):
+                                if (diff_ratio<0.7):
                                     try:
                                         print("songs found for the query in high quality song server. very different from the one in spotify" , search_term)
                                         print("Trying to download from youtube")
@@ -1005,7 +1026,7 @@ def main(page: ft.Page):
                                         print("Skipping... adding to failed_downloads.txt redownload with low quality in next run" )
                                         continue
 
-                                elif (difflib.SequenceMatcher(None, artist.lower(), track_info["artist_name"].lower()).ratio()<0.85):
+                                elif (diff_ratio<0.9):
                                     print("Artist name mismatch. Skipping...")
                                     tt = track_info["track_title"]
                                     aa = track_info["artist_name"]
