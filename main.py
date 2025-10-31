@@ -155,25 +155,43 @@ def decrypt_url(url):
 def search_song(query):
     search_url = search_base_url + query
     response = requests.get(search_url)
-    songs = response.json().get('songs', {}).get('data', [])
-    if not songs:
-        return "No songs found for the query."
-    song_id = response.json()['songs']['data'][0]['id']
-    best_diff = 0
-    best_song_id = song_id
-
-    for song_data in songs:
-        try:
-            song_id = song_data['id']
-            output_query = f"{song_data['title']} {song_data['more_info']['primary_artists']} {song_data['album']}"
-            diff_ratio = difflib.SequenceMatcher(None, query.lower(), output_query.lower()).ratio()
-            if diff_ratio > best_diff:
-                best_diff = diff_ratio
-                best_song_id = song_id
-            if diff_ratio == 1:
+    # First, try to find a song in the topquery data if available
+    try:
+        topquery_data = response.json().get('topquery', {}).get('data', [])
+        for item in topquery_data:
+            if item.get('type') == 'song' and item.get('id'):
+                # Use the first song id found in topquery data
+                best_song_id = item['id']
+                best_diff = 1.0  # highest similarity; we will exit early if exact match found
                 break
-        except Exception as e:
-            print(f"Error processing song data: {e}")
+        else:
+            best_song_id = None
+            best_diff = 0
+    except Exception:
+        best_song_id = None
+        best_diff = 0
+
+    # If a topquery song wasn't found, fall back to the existing logic
+    if not best_song_id:
+        songs = response.json().get('songs', {}).get('data', [])
+        if not songs:
+            return "No songs found for the query."
+        song_id = response.json()['songs']['data'][0]['id']
+        best_diff = 0
+        best_song_id = song_id
+
+        for song_data in songs:
+            try:
+                sid = song_data['id']
+                output_query = f"{song_data['title']} {song_data['more_info']['primary_artists']} {song_data['album']}"
+                diff_ratio = difflib.SequenceMatcher(None, query.lower(), output_query.lower()).ratio()
+                if diff_ratio > best_diff:
+                    best_diff = diff_ratio
+                    best_song_id = sid
+                if diff_ratio == 1:
+                    break
+            except Exception as e:
+                print(f"Error processing song data: {e}")
 
     if not best_song_id:
         return "No suitable song found."
