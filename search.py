@@ -1,6 +1,10 @@
 import requests
 import base64
 from pyDes import *
+import os
+import urllib.request
+from moviepy.editor import AudioFileClip
+from mutagen.id3 import ID3, TIT2, TPE1, TPE2, TALB, TDRC, TRCK, TSRC, USLT, APIC
 
 class Song:
     """Represents a single song and its metadata extracted from the API JSON.
@@ -220,12 +224,95 @@ class Search:
 
         return songs_list
 
-class DownloadSongs:
-    def __init__(self, songList):
-        self.songList = songList
-    
-    def download_songs(self):
-        
+class DownloadSong:
+    def __init__(self, song, output_folder="music-yt"):
+        self.song = song
+        self.output_folder = output_folder if output_folder.endswith(os.sep) else output_folder + os.sep
+
+    def download_song(self) -> str:
+        """Download the song using decrypted_media_url, convert to mp3, and add metadata and album art.
+
+        Returns the path to the final mp3 file on success, or raises an exception on failure.
+        """
+        if not self.song or not getattr(self.song, 'decrypted_media_url', None):
+            raise ValueError("Song has no decrypted URL")
+
+        # prepare folders
+        tmp_dir = os.path.join(self.output_folder, 'tmp')
+        os.makedirs(tmp_dir, exist_ok=True)
+        os.makedirs(self.output_folder, exist_ok=True)
+
+        # sanitize filename
+        title = self.song.title or "unknown"
+        safe_title = "".join(c for c in title if c not in ['/', '\\', '|', '?', '*', ':', '>', '<', '"'])
+
+        video_file = os.path.join(tmp_dir, f"{safe_title}.mp4")
+        audio_file = os.path.join(tmp_dir, f"{safe_title}.mp3")
+        final_file = os.path.join(self.output_folder, f"{safe_title}.mp3")
+
+        # download the media
+        url = self.song.decrypted_media_url
+        resp = requests.get(url, stream=True, timeout=30)
+        resp.raise_for_status()
+        with open(video_file, 'wb') as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+
+        # convert to mp3 (high quality similar to main.py)
+        clip = AudioFileClip(video_file)
+        try:
+            clip.write_audiofile(audio_file, bitrate="3000k")
+        finally:
+            clip.close()
+
+        # remove downloaded mp4
+        try:
+            os.remove(video_file)
+        except Exception:
+            pass
+
+        # add metadata using mutagen
+        try:
+            tags = ID3()
+            # artist
+            artist_name = getattr(self.song, 'subtitle', None) or getattr(self.song, 'artistMap', None) or ''
+            if isinstance(artist_name, dict):
+                # if artistMap present, join names
+                artist_name = ', '.join(v.get('name', '') for v in artist_name.values())
+            tags['TPE1'] = TPE1(encoding=3, text=artist_name or '')
+            # album (use album or album_id)
+            tags['TALB'] = TALB(encoding=3, text=getattr(self.song, 'album', '') or '')
+            tags['TIT2'] = TIT2(encoding=3, text=title)
+            # release year if available
+            if getattr(self.song, 'year', None):
+                tags['TDRC'] = TDRC(encoding=3, text=str(self.song.year))
+            # track number not available here; leave blank
+            tags.save(audio_file)
+
+            # add album art if image available
+            if getattr(self.song, 'image', None):
+                with urllib.request.urlopen(self.song.image) as img:
+                    img_data = img.read()
+                audio = ID3(audio_file)
+                audio['APIC'] = APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=img_data)
+                audio.save(v2_version=3)
+        except Exception as e:
+            # continue even if tagging fails
+            print(f"Warning: failed to set metadata for {title}: {e}")
+
+        # move final file to output folder
+        try:
+            if os.path.exists(final_file):
+                os.remove(final_file)
+            os.replace(audio_file, final_file)
+        except Exception:
+            # fallback to copy
+            import shutil
+            shutil.copy2(audio_file, final_file)
+            os.remove(audio_file)
+
+        return final_file
 
 def main():
     search_instance = Search()
@@ -243,6 +330,7 @@ def main():
             songs = search_instance.get_songs_from_album(result)
             for song in songs:
                 print(song.to_dict())
+                DownloadSong(song).download_song()
 
 if __name__ == "__main__":
     main()
