@@ -39,7 +39,9 @@ from pyDes import *
 import requests
 from mutagen.id3 import ID3, TIT2, TPE1, TPE2, TALB, TDRC, TRCK, TSRC, USLT, APIC
 from concurrent.futures import ThreadPoolExecutor
-import difflib
+import asyncio
+import aiohttp
+from search import Search, DownloadSong
 
 
 
@@ -527,6 +529,7 @@ def drop_down():
             ],
             autofocus=True,
         )
+
 def app_bar():
     view = ft.AppBar(
         title=ft.Text("Trackster"),
@@ -544,13 +547,15 @@ def handle_nav_change(e):
         switch_to_sp_tab(e)
     elif e.control.selected_index == 2:
         switch_to_am_tab(e)
+    elif e.control.selected_index == 3:
+        switch_to_search_tab(e)
 def nav_bar():
     view = ft.NavigationBar(
         destinations=[
             ft.NavigationBarDestination(icon=ft.icons.ONDEMAND_VIDEO_ROUNDED, label="Youtube"),
             ft.NavigationBarDestination(icon=ft.icons.MUSIC_NOTE, label="Spotify"),
-            ft.NavigationBarDestination(icon=ft.icons.APPLE_OUTLINED, label="Apple Music")
-            
+            ft.NavigationBarDestination(icon=ft.icons.APPLE_OUTLINED, label="Apple Music"),
+            ft.NavigationBarDestination(icon=ft.icons.SEARCH, label="Search"),
         ],
         on_change=handle_nav_change,
         border=ft.Border(
@@ -580,6 +585,7 @@ def switch_to_yt_tab(e):
     e.control.page.youtube_tab.visible = True
     e.control.page.spotify_tab.visible = False
     e.control.page.apple_music_tab.visible = False
+    e.control.page.search_tab.visible = False
     e.control.page.navigation_bar.selected_index = 0
     e.control.page.update()
 
@@ -589,6 +595,7 @@ def switch_to_sp_tab(e):
     e.control.page.youtube_tab.visible = False
     e.control.page.spotify_tab.visible = True
     e.control.page.apple_music_tab.visible = False
+    e.control.page.search_tab.visible = False
     e.control.page.navigation_bar.selected_index = 1
     e.control.page.update()
 
@@ -598,7 +605,18 @@ def switch_to_am_tab(e):
     e.control.page.youtube_tab.visible = False
     e.control.page.spotify_tab.visible = False
     e.control.page.apple_music_tab.visible = True
+    e.control.page.search_tab.visible = False
     e.control.page.navigation_bar.selected_index = 2
+    e.control.page.update()
+
+def switch_to_search_tab(e):
+    e.control.page.title = "Search"
+    set_theme(e, "Purple")
+    e.control.page.youtube_tab.visible = False
+    e.control.page.spotify_tab.visible = False
+    e.control.page.apple_music_tab.visible = False
+    e.control.page.search_tab.visible = True
+    e.control.page.navigation_bar.selected_index = 3
     e.control.page.update()
 
 def get_track_info(track_url, sp, max_retries=3, initial_timeout=1):
@@ -1338,13 +1356,138 @@ def main(page: ft.Page):
         ),
         visible= False
     )
+
+    # --- Search tab: allows searching artist/album and batch downloading ---
+    search_query = ft.TextField(keyboard_type=ft.KeyboardType.TEXT, width=800, hint_text="Type artist or album and press Search")
+    search_result_title = ft.Text("", size=16)
+    search_result_image = ft.Image(src="", width=100, height=100)
+    search_result_box = ft.Row([search_result_image, ft.Column([search_result_title])])
+    search_progress = ft.ProgressBar(value=0)
+
+    def perform_search(e):
+        q = search_query.value.strip()
+        if not q:
+            return
+        s = Search()
+        try:
+            res = s.search(q)
+        except Exception as err:
+            print(f"Search failed: {err}")
+            res = None
+        # clear previous
+        search_result_title.value = ""
+        search_result_image.src = ""
+        search_result_title.update()
+        search_result_image.update()
+        if not res or res == "not found":
+            search_result_title.value = "No result"
+            search_result_title.update()
+            e.control.page.update()
+            return
+        # display title and image
+        title = res.get('title') or res.get('name') or ''
+        img = res.get('image') or res.get('album_art') or ''
+        search_result_title.value = title + f"  ({res.get('type','')})"
+        search_result_image.src = img
+        # store result on page for download handler
+        e.control.page._last_search_result = res
+        search_result_title.update()
+        search_result_image.update()
+        e.control.page.update()
+
+    def start_download(e):
+        res = getattr(e.control.page, '_last_search_result', None)
+        if not res:
+            print("Nothing to download")
+            return
+
+        async def run_download():
+            s = Search()
+            # decide artist or album
+            typ = res.get('type')
+            if typ == 'artist':
+                songs = s.get_songs_from_artist(res)
+            elif typ == 'album':
+                songs = s.get_songs_from_album(res)
+            else:
+                print("Unsupported type for download")
+                return
+
+            total = len(songs)
+            if total == 0:
+                print("No songs found to download")
+                return
+            print(f"Starting download of {total} songs...")
+            song_count.value = f"Songs to download: {total}"
+            song_count.update()
+            e.control.page.update()
+            sem = asyncio.Semaphore(10)
+            timeout = aiohttp.ClientTimeout(total=120)
+            completed = 0
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                # create tasks in batches of 10
+                tasks = [DownloadSong(song, output_folder=music_folder_path, skip=True).download_song_async(session, sem) for song in songs]
+                for fut in asyncio.as_completed(tasks):
+                    try:
+                        path = await fut
+                        completed += 1
+                        search_progress.value = completed / total
+                        search_progress.update()
+                        downloaded_count.value = f"Downloaded {completed}/{total} songs."
+                        downloaded_count.update()
+                        e.control.page.update()
+                    except Exception as ex:
+                        print(f"Download failed: {ex}")
+            if completed == total:
+                downloaded_count.value = f"all done! Downloaded {completed} songs."
+            else:
+                downloaded_count.value = f"Download completed with errors. Downloaded {completed}/{total} songs. JUST CLICK DOWNLOAD AGAIN TO GET THE MISSED ONES"
+            downloaded_count.update()
+            e.control.page.update()
+
+        # run async download without blocking UI thread
+        try:
+            asyncio.run(run_download())
+            print("Download runner completed")
+            
+        except Exception as err:
+            print(f"Download runner failed: {err}")
+
+    search_btn = ft.ElevatedButton("Search", on_click=perform_search)
+    download_btn = ft.ElevatedButton("Download", on_click=start_download)
+    song_count = ft.Text("")
+    downloaded_count = ft.Text("")
+
+    search_tab = ft.Container(
+        ft.SafeArea(
+            content=ft.Column([
+                ft.Divider(opacity=0, height=20),
+                folder_picker,
+                ft.Divider(opacity=0, height=20),
+                ft.Text("Search Artist or Album:"),
+                ft.Row([search_query, search_btn]),
+                ft.Divider(opacity=0),
+                search_result_box,
+                ft.Divider(opacity=0),
+                download_btn,
+                song_count,
+                search_progress,
+                downloaded_count,
+                gesture_detector.detector,
+
+            ])
+        ),
+        visible=False
+    )
+
     page.spotify_tab=spotify_tab
     page.youtube_tab = youtube_tab
     page.apple_music_tab = apple_music_tab
+    page.search_tab = search_tab
     page.overlay.extend([ get_directory_dialog])
     
     page.add(
-        youtube_tab,spotify_tab,apple_music_tab
+        youtube_tab,spotify_tab,apple_music_tab, search_tab
     )
     for i in range(0, 101):
             pb.value = i * 0.01
