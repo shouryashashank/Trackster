@@ -3,8 +3,12 @@ import base64
 from pyDes import *
 import os
 import urllib.request
+import time
 from moviepy.editor import AudioFileClip
 from mutagen.id3 import ID3, TIT2, TPE1, TPE2, TALB, TDRC, TRCK, TSRC, USLT, APIC
+import asyncio
+import aiohttp
+from aiohttp import ClientTimeout
 
 class Song:
     """Represents a single song and its metadata extracted from the API JSON.
@@ -225,9 +229,10 @@ class Search:
         return songs_list
 
 class DownloadSong:
-    def __init__(self, song, output_folder="music-yt"):
+    def __init__(self, song, output_folder="music-yt", skip=False):
         self.song = song
         self.output_folder = output_folder if output_folder.endswith(os.sep) else output_folder + os.sep
+        self.skip = bool(skip)
 
     def download_song(self) -> str:
         """Download the song using decrypted_media_url, convert to mp3, and add metadata and album art.
@@ -250,21 +255,53 @@ class DownloadSong:
         audio_file = os.path.join(tmp_dir, f"{safe_title}.mp3")
         final_file = os.path.join(self.output_folder, f"{safe_title}.mp3")
 
-        # download the media
-        url = self.song.decrypted_media_url
-        resp = requests.get(url, stream=True, timeout=30)
-        resp.raise_for_status()
-        with open(video_file, 'wb') as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
+        # If skip flag is True and final file exists, skip downloading
+        if self.skip and os.path.exists(final_file):
+            print(f"Skipping existing file: {final_file}")
+            return final_file
 
-        # convert to mp3 (high quality similar to main.py)
-        clip = AudioFileClip(video_file)
-        try:
-            clip.write_audiofile(audio_file, bitrate="3000k")
-        finally:
-            clip.close()
+        url = self.song.decrypted_media_url
+        # retry parameters
+        max_attempts = 3
+        backoff = 1
+
+        # download the media with retries
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = requests.get(url, stream=True, timeout=30)
+                resp.raise_for_status()
+                with open(video_file, 'wb') as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                break
+            except Exception as e:
+                print(f"Attempt {attempt} - failed to download {title} from {url}: {e}")
+                if attempt == max_attempts:
+                    raise
+                time.sleep(backoff)
+                backoff *= 2
+
+        # convert to mp3 (high quality similar to main.py) with retry
+        for attempt in range(1, max_attempts + 1):
+            try:
+                clip = AudioFileClip(video_file)
+                try:
+                    clip.write_audiofile(audio_file, bitrate="3000k")
+                finally:
+                    clip.close()
+                break
+            except Exception as e:
+                print(f"Attempt {attempt} - failed to convert {video_file} to mp3: {e}")
+                if attempt == max_attempts:
+                    # cleanup and re-raise
+                    try:
+                        os.remove(video_file)
+                    except Exception:
+                        pass
+                    raise
+                time.sleep(backoff)
+                backoff *= 2
 
         # remove downloaded mp4
         try:
@@ -272,47 +309,178 @@ class DownloadSong:
         except Exception:
             pass
 
-        # add metadata using mutagen
-        try:
-            tags = ID3()
-            # artist
-            artist_name = getattr(self.song, 'subtitle', None) or getattr(self.song, 'artistMap', None) or ''
-            if isinstance(artist_name, dict):
-                # if artistMap present, join names
-                artist_name = ', '.join(v.get('name', '') for v in artist_name.values())
-            tags['TPE1'] = TPE1(encoding=3, text=artist_name or '')
-            # album (use album or album_id)
-            tags['TALB'] = TALB(encoding=3, text=getattr(self.song, 'album', '') or '')
-            tags['TIT2'] = TIT2(encoding=3, text=title)
-            # release year if available
-            if getattr(self.song, 'year', None):
-                tags['TDRC'] = TDRC(encoding=3, text=str(self.song.year))
-            # track number not available here; leave blank
-            tags.save(audio_file)
+        # add metadata using mutagen with retries
+        for attempt in range(1, max_attempts + 1):
+            try:
+                tags = ID3()
+                # artist
+                artist_name = getattr(self.song, 'subtitle', None) or getattr(self.song, 'artistMap', None) or ''
+                if isinstance(artist_name, dict):
+                    # if artistMap present, join names
+                    artist_name = ', '.join(v.get('name', '') for v in artist_name.values())
+                tags['TPE1'] = TPE1(encoding=3, text=artist_name or '')
+                # album (use album or album_id)
+                tags['TALB'] = TALB(encoding=3, text=getattr(self.song, 'album', '') or '')
+                tags['TIT2'] = TIT2(encoding=3, text=title)
+                # release year if available
+                if getattr(self.song, 'year', None):
+                    tags['TDRC'] = TDRC(encoding=3, text=str(self.song.year))
+                # track number not available here; leave blank
+                tags.save(audio_file)
 
-            # add album art if image available
-            if getattr(self.song, 'image', None):
-                with urllib.request.urlopen(self.song.image) as img:
-                    img_data = img.read()
-                audio = ID3(audio_file)
-                audio['APIC'] = APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=img_data)
-                audio.save(v2_version=3)
-        except Exception as e:
-            # continue even if tagging fails
-            print(f"Warning: failed to set metadata for {title}: {e}")
+                # add album art if image available
+                if getattr(self.song, 'image', None):
+                    with urllib.request.urlopen(self.song.image) as img:
+                        img_data = img.read()
+                    audio = ID3(audio_file)
+                    audio['APIC'] = APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=img_data)
+                    audio.save(v2_version=3)
+                break
+            except Exception as e:
+                print(f"Attempt {attempt} - failed to set metadata for {title}: {e}")
+                if attempt == max_attempts:
+                    print(f"Giving up on tagging for {title}")
+                else:
+                    time.sleep(backoff)
+                    backoff *= 2
 
         # move final file to output folder
         try:
             if os.path.exists(final_file):
                 os.remove(final_file)
             os.replace(audio_file, final_file)
-        except Exception:
+        except Exception as e:
             # fallback to copy
             import shutil
-            shutil.copy2(audio_file, final_file)
-            os.remove(audio_file)
+            try:
+                shutil.copy2(audio_file, final_file)
+                os.remove(audio_file)
+            except Exception as e2:
+                print(f"Failed to move/copy final file for {title}: {e} / {e2}")
+                raise
 
         return final_file
+
+    async def download_song_async(self, session: aiohttp.ClientSession, semaphore: asyncio.Semaphore) -> str:
+        """Async version: download, convert, tag and return final path."""
+        if not self.song or not getattr(self.song, 'decrypted_media_url', None):
+            raise ValueError("Song has no decrypted URL")
+
+        # prepare file names early to allow skip check before acquiring semaphore
+        title = self.song.title or "unknown"
+        safe_title = "".join(c for c in title if c not in ['/', '\\', '|', '?', '*', ':', '>', '<', '"'])
+        final_file = os.path.join(self.output_folder, f"{safe_title}.mp3")
+
+        # If skip flag is True and final file exists, skip downloading
+        if self.skip and os.path.exists(final_file):
+            print(f"Skipping existing file: {final_file}")
+            return final_file
+
+        async with semaphore:
+            # prepare folders
+            tmp_dir = os.path.join(self.output_folder, 'tmp')
+            os.makedirs(tmp_dir, exist_ok=True)
+            os.makedirs(self.output_folder, exist_ok=True)
+
+            video_file = os.path.join(tmp_dir, f"{safe_title}.mp4")
+            audio_file = os.path.join(tmp_dir, f"{safe_title}.mp3")
+
+            url = self.song.decrypted_media_url
+            timeout = ClientTimeout(total=60)
+
+            # async download with retries
+            max_attempts = 3
+            backoff = 1
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    async with session.get(url, timeout=timeout) as resp:
+                        resp.raise_for_status()
+                        with open(video_file, 'wb') as f:
+                            async for chunk in resp.content.iter_chunked(8192):
+                                f.write(chunk)
+                    break
+                except Exception as e:
+                    print(f"Attempt {attempt} - failed to download (async) {title} from {url}: {e}")
+                    if attempt == max_attempts:
+                        raise
+                    await asyncio.sleep(backoff)
+                    backoff *= 2
+
+            # convert to mp3 using moviepy (blocking) - run in threadpool
+            loop = asyncio.get_running_loop()
+            def convert():
+                clip = AudioFileClip(video_file)
+                try:
+                    clip.write_audiofile(audio_file, bitrate="3000k")
+                finally:
+                    clip.close()
+                try:
+                    os.remove(video_file)
+                except Exception:
+                    pass
+
+            # run conversion with retries in executor
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    await loop.run_in_executor(None, convert)
+                    break
+                except Exception as e:
+                    print(f"Attempt {attempt} - failed to convert (async) {video_file}: {e}")
+                    if attempt == max_attempts:
+                        raise
+                    await asyncio.sleep(backoff)
+                    backoff *= 2
+
+            # tagging (blocking) - run in threadpool with retries
+            def tag():
+                try:
+                    tags = ID3()
+                    artist_name = getattr(self.song, 'subtitle', None) or getattr(self.song, 'artistMap', None) or ''
+                    if isinstance(artist_name, dict):
+                        artist_name = ', '.join(v.get('name', '') for v in artist_name.values())
+                    tags['TPE1'] = TPE1(encoding=3, text=artist_name or '')
+                    tags['TALB'] = TALB(encoding=3, text=getattr(self.song, 'album', '') or '')
+                    tags['TIT2'] = TIT2(encoding=3, text=title)
+                    if getattr(self.song, 'year', None):
+                        tags['TDRC'] = TDRC(encoding=3, text=str(self.song.year))
+                    tags.save(audio_file)
+
+                    if getattr(self.song, 'image', None):
+                        with urllib.request.urlopen(self.song.image) as img:
+                            img_data = img.read()
+                        audio = ID3(audio_file)
+                        audio['APIC'] = APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=img_data)
+                        audio.save(v2_version=3)
+                except Exception as e:
+                    raise
+
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    await loop.run_in_executor(None, tag)
+                    break
+                except Exception as e:
+                    print(f"Attempt {attempt} - failed to tag (async) {title}: {e}")
+                    if attempt == max_attempts:
+                        print(f"Giving up on tagging for {title} (async)")
+                    else:
+                        await asyncio.sleep(backoff)
+                        backoff *= 2
+
+            # move file
+            try:
+                if os.path.exists(final_file):
+                    os.remove(final_file)
+                os.replace(audio_file, final_file)
+            except Exception as e:
+                import shutil
+                try:
+                    shutil.copy2(audio_file, final_file)
+                    os.remove(audio_file)
+                except Exception as e2:
+                    print(f"Failed to move/copy final file for {title} (async): {e} / {e2}")
+                    raise
+
+            return final_file
 
 def main():
     search_instance = Search()
@@ -328,9 +496,19 @@ def main():
         elif result.get('type') == 'album':
             print("Fetching songs for album...")
             songs = search_instance.get_songs_from_album(result)
-            for song in songs:
-                print(song.to_dict())
-                DownloadSong(song).download_song()
+            # run downloads in parallel using asyncio and aiohttp
+            async def run_all():
+                sem = asyncio.Semaphore(4)  # limit concurrency
+                timeout = ClientTimeout(total=120)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    tasks = [DownloadSong(song).download_song_async(session, sem) for song in songs]
+                    for fut in asyncio.as_completed(tasks):
+                        try:
+                            path = await fut
+                            print(f"Downloaded: {path}")
+                        except Exception as e:
+                            print(f"Download failed: {e}")
+            asyncio.run(run_all())
 
 if __name__ == "__main__":
     main()
