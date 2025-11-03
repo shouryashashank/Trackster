@@ -77,48 +77,88 @@ class Search:
         pass
 
     def search(self, query):
-        # Placeholder for search logic
+        # Return a structured set of candidates: topresult, artists (list), albums (list)
         print(f"Searching for: {query}")
         search_url = self.search_url + query
-        response = requests.get(search_url)
-        if response.status_code == 200:
-            # First, try to find a song in the topquery data if available
-            try:
-                top_query_data = response.json().get('topquery', {}).get('data', [])
-                # Look for artist or album items and return the first matching item as JSON
-                for item in top_query_data:
-                    item_type = item.get('type')
-                    if item_type in ('artist', 'album'):
-                        return item  # return the JSON object for artist or album
-                # If not found in topquery, try other fields in the response that may contain results
-                data = response.json()
-                # Search through all values in the JSON for lists of items
-                def find_in_obj(obj):
-                    if isinstance(obj, dict):
-                        for v in obj.values():
-                            res = find_in_obj(v)
-                            if res is not None:
-                                return res
-                    elif isinstance(obj, list):
-                        for elem in obj:
-                            if isinstance(elem, dict) and elem.get('type') in ('artist', 'album'):
-                                return elem
-                            res = find_in_obj(elem)
-                            if res is not None:
-                                return res
-                    return None
+        try:
+            response = requests.get(search_url, timeout=10)
+        except Exception as e:
+            print(f"Error fetching search results: {e}")
+            return None
 
-                found = find_in_obj(data)
-                if found:
-                    return found
-                # nothing found
-                return "not found"
-            except Exception:
-                return "not found"
-        else:
+        if response.status_code != 200:
             print("Error fetching search results")
             return None
-    
+
+        try:
+            data = response.json()
+        except Exception:
+            return None
+
+        topresult = None
+        artists = []
+        albums = []
+
+        # preferred: topquery.data
+        top_query_data = data.get('topquery', {}).get('data', [])
+        if isinstance(top_query_data, list) and top_query_data:
+            topresult = top_query_data[0]
+            # also collect artists/albums from topquery
+            for item in top_query_data:
+                if item.get('type') == 'artist' and len(artists) < 3:
+                    artists.append(item)
+                elif item.get('type') == 'album' and len(albums) < 3:
+                    albums.append(item)
+
+        # fallback: scan full response for items
+        def scan(obj,topresult_ref):
+            if isinstance(obj, dict):
+                for v in obj.values():
+                    scan(v,topresult_ref)
+            elif isinstance(obj, list):
+                for elem in obj:
+                    if isinstance(elem, dict):
+                        t = elem.get('type')
+                        if t == 'artist' and len(artists) < 3:
+                            artists.append(elem)
+                        elif t == 'album' and len(albums) < 3:
+                            albums.append(elem)
+                        # capture topresult if still none
+                        if topresult_ref is None and elem.get('type') in ('artist', 'album', 'song'):
+                            topresult_ref = elem
+                        # stop early if all collected
+                        if len(artists) >= 3 and len(albums) >= 3 and topresult_ref is not None:
+                            return
+                        scan(elem,topresult_ref)
+        # run scan
+        scan(data,topresult)
+
+        # ensure uniqueness
+        def uniq(lst):
+            seen = set()
+            out = []
+            for it in lst:
+                id_ = it.get('id') or it.get('perma_url') or repr(it)
+                if id_ not in seen:
+                    seen.add(id_)
+                    out.append(it)
+            return out
+
+        artists = uniq(artists)[:3]
+        albums = uniq(albums)[:3]
+
+        result = {
+            'topresult': topresult,
+            'artists': artists,
+            'albums': albums,
+        }
+
+        # if nothing meaningful found, return "not found" to keep compatibility
+        if not topresult and not artists and not albums:
+            return "not found"
+
+        return result
+
     def get_songs_from_artist(self, artist_json):
         artist_id = artist_json.get('id')
         if not artist_id:
