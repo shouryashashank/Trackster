@@ -1507,8 +1507,13 @@ def main(page: ft.Page):
                 for fut in asyncio.as_completed(tasks):
                     try:
                         path = await fut
-                        print(f"Downloaded: {path}")
+                        print(f"Downloaded: {path}, {completed}/{total} songs. ")
                         completed += 1
+                        search_progress.value = completed / total
+                        search_progress.update()
+                        downloaded_count.value = f"Downloaded {completed}/{total} songs."
+                        downloaded_count.update()
+                        e.control.page.update()
                     except Exception as ex:
                         print(f"Song download failed: {ex}")
                         
