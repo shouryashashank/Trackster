@@ -37,11 +37,16 @@ from moviepy.editor import *
 import base64
 from pyDes import *
 import requests
+import os
+import urllib.request
+import time
+from moviepy.editor import AudioFileClip
 from mutagen.id3 import ID3, TIT2, TPE1, TPE2, TALB, TDRC, TRCK, TSRC, USLT, APIC
-from concurrent.futures import ThreadPoolExecutor
 import asyncio
 import aiohttp
-from search import Search, DownloadSong
+from aiohttp import ClientTimeout
+import difflib
+from search import Search, DownloadSong, Song
 
 
 
@@ -1359,6 +1364,9 @@ def main(page: ft.Page):
 
     # --- Search tab: allows searching artist/album and batch downloading ---
     search_query = ft.TextField(keyboard_type=ft.KeyboardType.TEXT, width=800, hint_text="Type artist or album and press Search")
+    # Dropdown to select one candidate from topresult, artists and albums
+    search_candidates_dropdown = ft.Dropdown(label="Select result", width=800, options=[], on_change=lambda e: None)
+    # Show a preview (image + title) for the selected candidate
     search_result_title = ft.Text("", size=16)
     search_result_image = ft.Image(src="", width=100, height=100)
     search_result_box = ft.Row([search_result_image, ft.Column([search_result_title])])
@@ -1382,33 +1390,102 @@ def main(page: ft.Page):
         if not res or res == "not found":
             search_result_title.value = "No result"
             search_result_title.update()
+            search_result_image.update()
+            # clear dropdown
+            search_candidates_dropdown.options = []
+            search_candidates_dropdown.update()
             e.control.page.update()
             return
-        # display title and image
-        title = res.get('title') or res.get('name') or ''
-        img = res.get('image') or res.get('album_art') or ''
-        search_result_title.value = title + f"  ({res.get('type','')})"
-        search_result_image.src = img
-        # store result on page for download handler
-        e.control.page._last_search_result = res
+
+        # Build a flat list of candidates with labels and keep full items in a map
+        candidates = []
+        candidates_map = {}
+        idx = 0
+        if res.get('topresult'):
+            item = res['topresult']
+            label = f"Top: {item.get('title') or item.get('name') or item.get('perma_url','')[:40]}"
+            key = f"c_{idx}"
+            candidates.append(ft.dropdown.Option(key=key, text=label))
+            candidates_map[key] = item
+            idx += 1
+
+        for a in res.get('artists', []):
+            label = f"Artist: {a.get('title') or a.get('name') or a.get('perma_url','')[:40]}"
+            key = f"c_{idx}"
+            candidates.append(ft.dropdown.Option(key=key, text=label))
+            candidates_map[key] = a
+            idx += 1
+
+        for al in res.get('albums', []):
+            label = f"Album: {al.get('title') or al.get('name') or al.get('perma_url','')[:40]}"
+            key = f"c_{idx}"
+            candidates.append(ft.dropdown.Option(key=key, text=label))
+            candidates_map[key] = al
+            idx += 1
+
+        # populate dropdown
+        search_candidates_dropdown.options = candidates
+        search_candidates_dropdown.value = candidates[0].key if candidates else None
+        # save map on page for download
+        e.control.page._search_candidates_map = candidates_map
+
+        # update preview to first candidate
+        if candidates:
+            sel_key = search_candidates_dropdown.value
+            sel_item = candidates_map.get(sel_key)
+            title = sel_item.get('title') or sel_item.get('name') or ''
+            img = sel_item.get('image') or sel_item.get('album_art') or ''
+            search_result_title.value = title + f"  ({sel_item.get('type','')})"
+            search_result_image.src = img
+        else:
+            search_result_title.value = "No result"
+            search_result_image.src = ''
+
+        search_candidates_dropdown.update()
         search_result_title.update()
         search_result_image.update()
         e.control.page.update()
 
+    # update preview when user selects different candidate
+    def candidate_changed(e):
+        sel_key = e.control.value
+        candidates_map = getattr(e.control.page, '_search_candidates_map', {})
+        sel_item = candidates_map.get(sel_key)
+        if not sel_item:
+            search_result_title.value = "No result"
+            search_result_image.src = ""
+        else:
+            title = sel_item.get('title') or sel_item.get('name') or ''
+            img = sel_item.get('image') or sel_item.get('album_art') or ''
+            search_result_title.value = title + f"  ({sel_item.get('type','')})"
+            search_result_image.src = img
+        search_result_title.update()
+        search_result_image.update()
+        e.control.page.update()
+
+    # wire dropdown change to handler
+    search_candidates_dropdown.on_change = candidate_changed
+
     def start_download(e):
-        res = getattr(e.control.page, '_last_search_result', None)
-        if not res:
-            print("Nothing to download")
+        # read selected candidate
+        sel_key = search_candidates_dropdown.value
+        candidates_map = getattr(e.control.page, '_search_candidates_map', {})
+        sel = candidates_map.get(sel_key)
+        if not sel:
+            print("Nothing selected to download")
             return
 
         async def run_download():
             s = Search()
-            # decide artist or album
-            typ = res.get('type')
+            # decide artist or album or single song
+            typ = sel.get('type')
             if typ == 'artist':
-                songs = s.get_songs_from_artist(res)
+                songs = s.get_songs_from_artist(sel)
             elif typ == 'album':
-                songs = s.get_songs_from_album(res)
+                songs = s.get_songs_from_album(sel)
+            elif typ == 'song':
+                # single song -> wrap in list
+                songs = [Song(sel)] if 'Song' in globals() else [sel]
             else:
                 print("Unsupported type for download")
                 return
@@ -1430,14 +1507,11 @@ def main(page: ft.Page):
                 for fut in asyncio.as_completed(tasks):
                     try:
                         path = await fut
+                        print(f"Downloaded: {path}")
                         completed += 1
-                        search_progress.value = completed / total
-                        search_progress.update()
-                        downloaded_count.value = f"Downloaded {completed}/{total} songs."
-                        downloaded_count.update()
-                        e.control.page.update()
                     except Exception as ex:
-                        print(f"Download failed: {ex}")
+                        print(f"Song download failed: {ex}")
+                        
             if completed == total:
                 downloaded_count.value = f"all done! Downloaded {completed} songs."
             else:
@@ -1449,7 +1523,7 @@ def main(page: ft.Page):
         try:
             asyncio.run(run_download())
             print("Download runner completed")
-            
+        
         except Exception as err:
             print(f"Download runner failed: {err}")
 
@@ -1467,7 +1541,8 @@ def main(page: ft.Page):
                 ft.Text("Search Artist or Album:"),
                 ft.Row([search_query, search_btn]),
                 ft.Divider(opacity=0),
-                search_result_box,
+                search_candidates_dropdown,
+                search_result_box,                
                 ft.Divider(opacity=0),
                 download_btn,
                 song_count,
