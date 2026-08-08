@@ -31,6 +31,7 @@ dev = [
 
 [project.scripts]
 trackpod = "trackpod.cli:main"
+trackpod-gui = "trackpod.ui.app:run_application"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/trackpod"]

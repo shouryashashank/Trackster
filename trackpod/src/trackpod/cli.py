@@ -82,6 +82,12 @@ def cmd_download(args) -> int:
     return 0
 
 
+def cmd_gui(_args) -> int:
+    from trackpod.ui.app import run_application
+
+    return run_application()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="trackpod", description="Trackpod music manager")
     sub = p.add_subparsers(dest="command")
@@ -101,6 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
     res.add_argument("--source-id", type=int, help="only this source id")
 
     sub.add_parser("download", help="download pending tracks")
+
+    sub.add_parser("gui", help="open the desktop UI (PySide6)")
     return p
 
 
@@ -118,6 +126,8 @@ def main(argv=None) -> int:
         return cmd_resolve(args)
     if args.command == "download":
         return cmd_download(args)
+    if args.command == "gui":
+        return cmd_gui(args)
     build_parser().print_help()
     return 0 if args.command else 1
 
