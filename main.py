@@ -1,81 +1,262 @@
-import flet as ft
-import time
-import os
-from pytube import Playlist
-from moviepy.editor import *
-from mutagen.easyid3 import EasyID3
-import requests
-import spotipy
-from spotipy.oauth2 import SpotifyClientCredentials
-from mutagen.id3 import APIC, ID3
-import urllib.request
-from tqdm import tqdm
-from dotenv import load_dotenv
+import asyncio
+import base64
+import difflib
+import glob
+import logging
 import os
 import re
-import shutil
-import time
-import urllib.request
-import pickle
-from tqdm import tqdm
-import spotipy
-from moviepy.editor import *
-from mutagen.easyid3 import EasyID3
-from mutagen.id3 import APIC, ID3
-from pytube import YouTube
-import pytube.exceptions
-from rich.console import Console
-from spotipy.oauth2 import SpotifyClientCredentials
-from yarl import URL
 import ssl
-import sys, io
-from bs4 import BeautifulSoup
-import apple
-import yt_dlp
-from yt_dlp.utils import download_range_func
-from moviepy.editor import *
-import base64
-from pyDes import *
-import requests
-import os
-import urllib.request
 import time
-from moviepy.editor import AudioFileClip
-from mutagen.id3 import ID3, TIT2, TPE1, TPE2, TALB, TDRC, TRCK, TSRC, USLT, APIC
-import asyncio
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+
 import aiohttp
+import flet as ft
+import requests
+import spotipy
+import yt_dlp
 from aiohttp import ClientTimeout
-import difflib
-from search import Search, DownloadSong, Song
+from dotenv import load_dotenv
+try:
+    from moviepy.editor import AudioFileClip  # moviepy 1.x
+except ImportError:
+    from moviepy.audio.io.AudioFileClip import AudioFileClip  # moviepy 2.x
+from mutagen.id3 import APIC, ID3, TALB, TDRC, TIT2, TPE1, TPE2, TRCK, TSRC, USLT
+from pyDes import ECB, PAD_PKCS5, des
+from pytube import Playlist, YouTube
+from spotipy.oauth2 import SpotifyClientCredentials
+from tqdm import tqdm
+from yarl import URL
 
+import apple
+from db import (
+    add_downloaded,
+    add_failed,
+    add_mismatch,
+    add_synced,
+    clear_failed,
+    get_failed_titles,
+    get_setting,
+    get_synced_ids,
+    init_db,
+    migrate_env,
+    remove_failed,
+    set_setting,
+)
+from search import DownloadSong, Search, Song
 
-
-# buffer = io.StringIO()
-# sys.stdout = sys.stderr = buffer
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
 ssl._create_default_https_context = ssl._create_unverified_context
-# pyinstaller --noconfirm --onefile --windowed --icon "D:\Code\github\music\Trackster\icon_for_an_app_called_trakster_used_to_download_spotify_and_youtube_playlist-removebg-preview.ico" --name "Trackster_101_Fix_Premium"  "D:\Code\github\music\Trackster\main.py"
-file_exists_action=""
-failed_download = False
-high_quality = False
+
 search_base_url = "https://www.jiosaavn.com/api.php?__call=autocomplete.get&_format=json&_marker=0&cc=in&includeMetaTags=1&query="
 song_base_url = "https://www.jiosaavn.com/api.php?__call=song.getDetails&cc=in&_marker=0%3F_marker%3D0&_format=json&pids="
 lyrics_base_url = "https://www.jiosaavn.com/api.php?__call=lyrics.getLyricvideo_files&ctx=web6dot0&api_version=4&_format=json&_marker=0%3F_marker%3D0&lyrics_id="
-music_folder_path = "music-yt/"   # path to save the downloaded music
-# SPOTIPY_CLIENT_ID = "" # Spotify API client ID  # keep blank if you dont need spotify metadata
-# SPOTIPY_CLIENT_SECRET = ""  # Spotify API client secret
+
+
+class AppState:
+    """Shared mutable app state, kept out of module globals."""
+
+    def __init__(self):
+        self.music_folder_path = "music-yt/"
+        self.file_exists_action = ""
+        self.use_spotify_for_metadata = True
+
+
+state = AppState()
+
+
+# --------------------------------------------------------------------------
+# Filesystem helpers
+# --------------------------------------------------------------------------
 
 def sanitize_filename(filename):
     return re.sub(r'[<>:"/\\|?*]', '', filename)
 
+
+def ensure_folder_path_ends_with_slash(folder_path):
+    folder_path = folder_path.rstrip("/\\")
+    return folder_path + os.sep
+
+
+def make_alpha_numeric(string):
+    return ''.join(char for char in string if char.isalnum())
+
+
+# --------------------------------------------------------------------------
+# Spotify client / metadata
+# --------------------------------------------------------------------------
+
+def get_spotify_client():
+    load_dotenv()
+    client_id = get_setting("SPOTIPY_CLIENT_ID") or os.getenv("SPOTIPY_CLIENT_ID")
+    client_secret = get_setting("SPOTIPY_CLIENT_SECRET") or os.getenv("SPOTIPY_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        log.warning("Spotify API credentials missing; continuing without metadata.")
+        return None
+    try:
+        manager = SpotifyClientCredentials(
+            client_id=client_id, client_secret=client_secret
+        )
+        return spotipy.Spotify(client_credentials_manager=manager)
+    except Exception as e:
+        log.error("Failed to connect to Spotify API: %s", e)
+        return None
+
+
+def search_spotify(search_term, sp):
+    """search for the track on spotify"""
+    search_results = sp.search(search_term, type="track", limit=1)
+    if search_results["tracks"]["total"] == 0:
+        return None
+    track = search_results["tracks"]["items"][0]
+    return track["external_urls"]["spotify"]
+
+
+def get_track_info_spotify(track_url, sp):
+    res = requests.get(track_url)
+    if res.status_code != 200:
+        for _ in range(3):
+            res = requests.get(track_url)
+            if res.status_code == 200:
+                break
+    if res.status_code != 200:
+        log.error("Invalid Spotify track URL: %s", track_url)
+
+    track = sp.track(track_url)
+
+    return {
+        "artist_name": track["artists"][0]["name"],
+        "track_title": track["name"],
+        "track_number": track["track_number"],
+        "isrc": track["external_ids"].get("isrc") if track.get("external_ids") else "",
+        "album_art": track["album"]["images"][1]["url"],
+        "album_name": track["album"]["name"],
+        "release_date": track["album"]["release_date"],
+        "artists": [artist["name"] for artist in track["artists"]],
+    }
+
+
+def get_track_info_youtube(video):
+    publish_date = getattr(video, "publish_date", None)
+    release_date = publish_date.strftime("%Y-%m-%d") if publish_date else ""
+    return {
+        "artist_name": video.author,
+        "track_title": video.title,
+        "track_number": 0,
+        "isrc": "",
+        "album_art": video.thumbnail_url,
+        "album_name": video.author,
+        "release_date": release_date,
+        "artists": [video.author],
+    }
+
+
+def get_track_info(track_url, sp, max_retries=3, initial_timeout=1):
+    """Get track metadata from Spotify with retry logic for timeouts."""
+    last_exception = None
+
+    for attempt in range(max_retries + 1):  # +1 for the initial attempt
+        try:
+            track = sp.track(track_url)
+            isrc = track["external_ids"].get("isrc") if track.get("external_ids") else None
+
+            return {
+                "artist_name": track["artists"][0]["name"],
+                "track_title": track["name"],
+                "track_number": track["track_number"],
+                "isrc": isrc,
+                "album_art": track["album"]["images"][1]["url"],
+                "album_name": track["album"]["name"],
+                "release_date": track["album"]["release_date"],
+                "artists": [artist["name"] for artist in track["artists"]],
+            }
+
+        except Exception as e:
+            last_exception = e
+            if attempt < max_retries:
+                wait_time = initial_timeout * (2 ** attempt)  # Exponential backoff
+                print(f"Attempt {attempt + 1} failed. Retrying in {wait_time} seconds... Error: {str(e)}")
+                time.sleep(wait_time)
+            continue
+
+    print(f"Failed to get track info after {max_retries + 1} attempts. Last error: {str(last_exception)}")
+    return None
+
+
+def get_playlist_info(sp_playlist, sp):
+    res = requests.get(sp_playlist)
+    if res.status_code != 200:
+        raise ValueError("Invalid Spotify playlist URL")
+    pl = sp.playlist(sp_playlist)
+    if not pl["public"]:
+        raise ValueError(
+            "Can't download private playlists. Change your playlist's state to public."
+        )
+    playlist = sp.playlist_tracks(sp_playlist)
+
+    tracks_item = playlist['items']
+
+    while playlist['next']:
+        playlist = sp.next(playlist)
+        tracks_item.extend(playlist['items'])
+
+    tracks = [item["track"] for item in tracks_item if item.get("track") and item["track"].get("id")]
+    synced_ids = get_synced_ids()
+    tracks_info = []
+    for track in tqdm(tracks):
+        if track["id"] in synced_ids:
+            continue
+        track_url = f"https://open.spotify.com/track/{track['id']}"
+        track_info = get_track_info(track_url, sp)
+        if track_info:
+            tracks_info.append(track_info)
+            add_synced(track["id"])
+    return tracks_info
+
+
+def get_album_info(sp_album, sp):
+    res = requests.get(sp_album)
+    if res.status_code != 200:
+        raise ValueError("Invalid Spotify album URL")
+
+    playlist = sp.album_tracks(sp_album)
+
+    tracks_item = playlist['items']
+
+    while playlist['next']:
+        playlist = sp.next(playlist)
+        tracks_item.extend(playlist['items'])
+
+    synced_ids = get_synced_ids()
+
+    def process_track(track):
+        if track["id"] in synced_ids:
+            return None
+        track_url = f"https://open.spotify.com/track/{track['id']}"
+        info = get_track_info(track_url, sp)
+        if info:
+            add_synced(track["id"])
+        return info
+
+    with ThreadPoolExecutor() as executor:
+        results = list(tqdm(executor.map(process_track, tracks_item), total=len(tracks_item)))
+
+    return [r for r in results if r]
+
+
+# --------------------------------------------------------------------------
+# Download engines
+# --------------------------------------------------------------------------
+
 def prompt_exists_action():
     """ask the user what happens if the file being downloaded already exists"""
-    global file_exists_action
-    if file_exists_action == "SA":  # SA == 'Skip All'
+    if state.file_exists_action == "SA":  # SA == 'Skip All'
         return False
-    elif file_exists_action == "RA":  # RA == 'Replace All'
+    elif state.file_exists_action == "RA":  # RA == 'Replace All'
         return True
-    
+
     print("This file already exists.")
     while True:
         resp = (
@@ -84,72 +265,52 @@ def prompt_exists_action():
             .strip()
         )
         if resp in ("RA", "SA"):
-            file_exists_action = resp
+            state.file_exists_action = resp
         if resp in ("R", "RA"):
             return True
         elif resp in ("S", "SA"):
             return False
         print("---Invalid response---")
 
-def make_alpha_numeric(string):
-    return ''.join(char for char in string if char.isalnum())
 
-def download_yt(yt,search_term):
+def download_yt(yt, search_term):
     """download the video in mp3 format from youtube"""
-    # remove chars that can't be in a windows file name
-    yt.title = "".join([c for c in yt.title if c not in ['/', '\\', '|', '?', '*', ':', '>', '<', '"']])
-    # don't download existing files if the user wants to skip them
-    exists = os.path.exists(f"{music_folder_path}{yt.title}.mp3")
+    safe_title = "".join([c for c in yt.title if c not in ['/', '\\', '|', '?', '*', ':', '>', '<', '"']])
+    final_path = os.path.join(state.music_folder_path, f"{safe_title}.mp3")
+    exists = os.path.exists(final_path)
     if exists and not prompt_exists_action():
         return False
 
-    # download the music
+    tmp_dir = os.path.join(state.music_folder_path, "tmp") + os.sep
+    os.makedirs(tmp_dir, exist_ok=True)
+    out_base = os.path.join(tmp_dir, safe_title)
     yt_opts = {
-        'extract_audio': True,
-        'format': 'bestaudio', 
-        'outtmpl': f"{music_folder_path}tmp/{yt.title}.mp4",
-        }
+        'format': 'bestaudio/best',
+        'outtmpl': out_base + '.%(ext)s',
+        'noplaylist': True,
+        'quiet': True,
+        'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}],
+    }
     with yt_dlp.YoutubeDL(yt_opts) as ydl:
-        ydl.download(yt.watch_url)
-    # max_retries = 3
-    # attempt = 0
-    # video = None
+        ydl.download([yt.watch_url])
 
-    # while attempt < max_retries:
-    #     try:
-    #         video = yt.streams.filter(only_audio=True).first()
-    #         if video:
-    #             break
-    #     except Exception as e:
-    #         print(f"Attempt {attempt + 1}  {search_term} failed due to: {e}")
-    #         attempt += 1
-    # if not video:
-    #     print(f"Failed to download {search_term}")
-    #     # check if a file named failed_downloads.txt exists if not create one and append the failed download
-    #     if not os.path.exists("failed_downloads.txt"):
-    #         with open("failed_downloads.txt", "w") as f:
-    #             f.write(f"{search_term}\n")
-    #     else:
-    #         with open("failed_downloads.txt", "a") as f:
-    #             f.write(f"{search_term}\n")
-    #     return False
-    # vid_file = video.download(output_path=f"{music_folder_path}tmp")
-    # # convert the downloaded video to mp3
-    # base = os.path.splitext(vid_file)[0]
-    # audio_file = base + ".mp3"
-    # mp4_no_frame = AudioFileClip(vid_file)
-    # mp4_no_frame.write_audiofile(audio_file, logger=None)
-    # mp4_no_frame.close()
-    # os.remove(vid_file)
-    # os.replace(audio_file, f"{music_folder_path}tmp/{yt.title}.mp3")
-    video_file = f"{music_folder_path}tmp/{yt.title}.mp4"
-    audio_file = f"{music_folder_path}tmp/{yt.title}.mp3"
-    FILETOCONVERT = AudioFileClip(video_file)
-    FILETOCONVERT.write_audiofile(audio_file)
-    FILETOCONVERT.close()
-    os.remove(video_file)
-    audio_file = f"{music_folder_path}tmp/{yt.title}.mp3"
-    return audio_file
+    mp3_file = out_base + '.mp3'
+    if not os.path.exists(mp3_file):
+        # yt-dlp may have sanitized the filename; find what it actually wrote
+        matches = glob.glob(out_base + '.*')
+        mp3_file = next((m for m in matches if m.lower().endswith('.mp3')), None)
+        if mp3_file is None and matches:
+            # no ffmpeg postprocessor available: convert the raw bestaudio file
+            raw = matches[0]
+            mp3_file = out_base + '.mp3'
+            clip = AudioFileClip(raw)
+            try:
+                clip.write_audiofile(mp3_file)
+            finally:
+                clip.close()
+            os.remove(raw)
+    return mp3_file if mp3_file and os.path.exists(mp3_file) else None
+
 
 def decrypt_url(url):
     des_cipher = des(b"38346591", ECB, b"\0\0\0\0\0\0\0\0",
@@ -159,31 +320,33 @@ def decrypt_url(url):
     dec_url = dec_url.replace("_96.mp4", "_320.mp4")
     return dec_url
 
+
 def search_song(query):
+    """Search JioSaavn for a song. Returns a metadata dict or None."""
     search_url = search_base_url + query
-    response = requests.get(search_url)
+    response = requests.get(search_url, timeout=15)
     # First, try to find a song in the topquery data if available
+    best_song_id = None
+    best_diff = 0
     try:
         topquery_data = response.json().get('topquery', {}).get('data', [])
         for item in topquery_data:
             if item.get('type') == 'song' and item.get('id'):
-                # Use the first song id found in topquery data
                 best_song_id = item['id']
-                best_diff = 1.0  # highest similarity; we will exit early if exact match found
+                best_diff = 1.0  # highest similarity; exit early if exact match found
                 break
-        else:
-            best_song_id = None
-            best_diff = 0
-    except Exception:
-        best_song_id = None
-        best_diff = 0
+    except Exception as e:
+        log.warning("Failed to read topquery results: %s", e)
 
     # If a topquery song wasn't found, fall back to the existing logic
     if not best_song_id:
-        songs = response.json().get('songs', {}).get('data', [])
+        try:
+            songs = response.json().get('songs', {}).get('data', [])
+        except Exception:
+            songs = []
         if not songs:
-            return "No songs found for the query."
-        song_id = response.json()['songs']['data'][0]['id']
+            return None
+        song_id = songs[0]['id']
         best_diff = 0
         best_song_id = song_id
 
@@ -201,97 +364,75 @@ def search_song(query):
                 print(f"Error processing song data: {e}")
 
     if not best_song_id:
-        return "No suitable song found."
-    
-    song_url = song_base_url + best_song_id
-    response = requests.get(song_url)
-    song_url = response.json()[best_song_id]['encrypted_media_url']
-    primary_artists = response.json()[best_song_id]['primary_artists']
-    album = response.json()[best_song_id]['album']
-    song = response.json()[best_song_id]['song']
-    release_date = response.json()[best_song_id]['release_date']
+        return None
 
-    has_lyrics = response.json()[best_song_id]['has_lyrics'] == 'true'
+    song_url = song_base_url + best_song_id
+    response = requests.get(song_url, timeout=15)
+    song_data = response.json()[best_song_id]
+
+    has_lyrics = song_data['has_lyrics'] == 'true'
     lyrics = ""
     if has_lyrics:
         lyrics_url = lyrics_base_url + best_song_id
         try:
-            lyrics_response = requests.get(lyrics_url)
+            lyrics_response = requests.get(lyrics_url, timeout=15)
             lyrics = lyrics_response.json()['lyrics']
         except Exception as e:
-            print(f"Failed to get lyrics for {song}: {e}")
-    
+            print(f"Failed to get lyrics for {song_data['song']}: {e}")
+
     return {
-    "url": decrypt_url(song_url),
-    "primary_artists": primary_artists,
-    "album": album,
-    "song": song,
-    "release_date": release_date,
-    "lyrics": lyrics
+        "url": decrypt_url(song_data['encrypted_media_url']),
+        "primary_artists": song_data['primary_artists'],
+        "album": song_data['album'],
+        "song": song_data['song'],
+        "release_date": song_data['release_date'],
+        "lyrics": lyrics,
     }
+
 
 def download_high_quality(search_term):
     song = search_song(search_term)
-    if song == "No songs found for the query.": return song
-    song_url = song['url']
     if not isinstance(song, dict):
-        return "Unexpected response format."
-    file  = f"{music_folder_path}{os.path.basename(song['song'])}.mp3"
+        return None
+    song_url = song['url']
+    sanitized_song_name = sanitize_filename(song['song'])
+    file = os.path.join(state.music_folder_path, f"{sanitized_song_name}.mp3")
     # check if the file already exists
     if os.path.exists(file):
         if not prompt_exists_action():
             return "File already exists."
     response = requests.get(song_url)
-    # create new folder if it doesn't exist "tmp"
-    if not os.path.exists(f"{music_folder_path}tmp"):
-        os.makedirs(f"{music_folder_path}tmp")
-    sanitized_song_name = sanitize_filename(song['song'])
-    video_file = f"{music_folder_path}tmp/{sanitized_song_name}.mp4"
-    audio_file = f"{music_folder_path}tmp/{sanitized_song_name}.mp3"
+    tmp_dir = os.path.join(state.music_folder_path, "tmp") + os.sep
+    os.makedirs(tmp_dir, exist_ok=True)
+    video_file = os.path.join(tmp_dir, f"{sanitized_song_name}.mp4")
+    audio_file = os.path.join(tmp_dir, f"{sanitized_song_name}.mp3")
     with open(video_file, "wb") as f:
         f.write(response.content)
     FILETOCONVERT = AudioFileClip(video_file)
-    FILETOCONVERT.write_audiofile(audio_file,bitrate="3000k")
+    FILETOCONVERT.write_audiofile(audio_file, bitrate="3000k")
     FILETOCONVERT.close()
     os.remove(video_file)
     song["mp3"] = audio_file
     return song
-# def set_metadata(metadata, file_path,lyrics):
-#     """adds metadata to the downloaded mp3 file"""
 
-#     mp3file = ID3(file_path)
 
-#     # add metadata
-#     mp3file["albumartist"] = metadata["artist_name"]
-#     mp3file["artist"] = metadata["artists"]
-#     mp3file["album"] = metadata["album_name"]
-#     mp3file["title"] = metadata["track_title"]
-#     mp3file["date"] = metadata["release_date"]
-#     mp3file["tracknumber"] = str(metadata["track_number"])
-#     mp3file["isrc"] = metadata["isrc"]
-#     if lyrics != "":
-#         ulyrics = mp3file.getall('USLT')[0]
-
-#         # change the lyrics text
-#         ulyrics.text = lyrics
-#         mp3file.setall('USLT', [ulyrics])
-#     mp3file.save()
+# --------------------------------------------------------------------------
+# Metadata tagging
+# --------------------------------------------------------------------------
 
 def set_metadata(metadata, file_path, lyrics):
     """adds metadata to the downloaded mp3 file"""
 
     mp3file = ID3(file_path)
 
-    # add metadata
     mp3file["TPE1"] = TPE1(encoding=3, text=metadata["artist_name"])
     mp3file["TPE2"] = TPE2(encoding=3, text=metadata["artists"])
     mp3file["TALB"] = TALB(encoding=3, text=metadata["album_name"])
     mp3file["TIT2"] = TIT2(encoding=3, text=metadata["track_title"])
-    mp3file["TDRC"] = TDRC(encoding=3, text=metadata["release_date"])
-    mp3file["TRCK"] = TRCK(encoding=3, text=str(metadata["track_number"]))
-    mp3file["TSRC"] = TSRC(encoding=3, text=metadata["isrc"])
-    if lyrics != "":
-        # Check if USLT frame exists, if not create a new one
+    mp3file["TDRC"] = TDRC(encoding=3, text=metadata.get("release_date") or "")
+    mp3file["TRCK"] = TRCK(encoding=3, text=str(metadata.get("track_number") or 0))
+    mp3file["TSRC"] = TSRC(encoding=3, text=metadata.get("isrc") or "")
+    if lyrics:
         if mp3file.getall('USLT'):
             ulyrics = mp3file.getall('USLT')[0]
             ulyrics.text = lyrics
@@ -301,186 +442,138 @@ def set_metadata(metadata, file_path, lyrics):
     mp3file.save()
 
     # add album cover
-    audio = ID3(file_path)
-    with urllib.request.urlopen(metadata["album_art"]) as albumart:
-        audio["APIC"] = APIC(
-            encoding=3,
-            mime='image/jpeg',
-            type=3,
-            desc=u'Cover',
-            data=albumart.read()
-        )
-    audio.save()
-
-    # add album cover
-    audio = ID3(file_path)
-    with urllib.request.urlopen(metadata["album_art"]) as albumart:
-        audio["APIC"] = APIC(
-            encoding=3, mime="image/jpeg", type=3, desc="Cover", data=albumart.read()
-        )
-    audio.save(v2_version=3)
-
-def search_spotify(search_term : str, sp)->str:
-    """search for the track on spotify"""
-    search_results = sp.search(search_term, type="track", limit=1)
-    if search_results["tracks"]["total"] == 0:
-        return None
-    track = search_results["tracks"]["items"][0]
-    return track["external_urls"]["spotify"]
-
-def get_track_info_spotify(track_url,sp):
-    res = requests.get(track_url)
-    if res.status_code != 200:
-        # retry 3 times
-        for i in range(3):
-            res = requests.get(track_url)
-            if res.status_code == 200:
-                break
-    if res.status_code != 200:
-        print("Invalid Spotify track URL")
-
-    track = sp.track(track_url)
-
-    track_metadata = {
-        "artist_name": track["artists"][0]["name"],
-        "track_title": track["name"],
-        "track_number": track["track_number"],
-        "isrc": track["external_ids"]["isrc"],
-        "album_art": track["album"]["images"][1]["url"],
-        "album_name": track["album"]["name"],
-        "release_date": track["album"]["release_date"],
-        "artists": [artist["name"] for artist in track["artists"]],
-    }
-
-    return track_metadata
-
-def get_track_info_youtube(video):
-
-    track_metadata = {
-        "artist_name": video.author,
-        "track_title":  video.title,
-        "track_number": 0,
-        "isrc": "",
-        "album_art": video.thumbnail_url,
-        "album_name": video.author,
-        "release_date": video.publish_date.strftime("%Y-%m-%d"),
-        "artists": [video.author],
-    }
-
-    return track_metadata
-
-def ensure_folder_path_ends_with_slash(folder_path):
-    if not folder_path.endswith(os.sep):
-        folder_path += os.sep
-    return folder_path
+    album_art = metadata.get("album_art")
+    if album_art:
+        audio = ID3(file_path)
+        with urllib.request.urlopen(album_art) as albumart:
+            audio["APIC"] = APIC(
+                encoding=3,
+                mime='image/jpeg',
+                type=3,
+                desc='Cover',
+                data=albumart.read()
+            )
+        audio.save(v2_version=3)
 
 
+# --------------------------------------------------------------------------
+# YouTube search
+# --------------------------------------------------------------------------
+
+def find_youtube(query):
+    query = query.replace("é", "e")
+    query = query.replace("’", "")
+    query = query.replace("æ", "ae")
+    query = query.replace("ñ", "n")
+    query = query.replace("–", "+")
+    query = query.replace("‘", "")
+    query = query.replace("ú", "u")
+
+    phrase = query.replace(" ", "+")
+    search_link = "https://www.youtube.com/results?search_query=" + phrase
+    count = 0
+    while count < 5:
+        try:
+            search_link = str(URL(search_link))
+            response = urllib.request.urlopen(search_link)
+            break
+        except Exception:
+            count += 1
+    else:
+        raise ValueError("Please check your internet connection and try again later.")
+
+    search_results = re.findall(r"watch\?v=(\S{11})", response.read().decode())
+    first_vid = "https://www.youtube.com/watch?v=" + search_results[0]
+
+    return first_vid
 
 
-    
+# --------------------------------------------------------------------------
+# Flet UI helpers
+# --------------------------------------------------------------------------
 
-# Open directory dialog
-def get_directory_result(e: ft.FilePickerResultEvent):
-    directory_path.value = e.path if e.path else "Cancelled!"
+async def pick_folder(e):
+    picker = ft.FilePicker()
+    path = await picker.get_directory_path()
+    if not path:
+        directory_path.value = "Cancelled!"
+    else:
+        directory_path.value = path
+        state.music_folder_path = ensure_folder_path_ends_with_slash(path)
+        print(state.music_folder_path)
     directory_path.update()
-    global music_folder_path
-    music_folder_path = ensure_folder_path_ends_with_slash(e.path)
-    print(music_folder_path)
-
-get_directory_dialog = ft.FilePicker(on_result=get_directory_result)
-directory_path = ft.Text()
-def set_theme(e,color):
-    e.control.page.theme = ft.Theme(color_scheme_seed=color)
     e.control.page.update()
-def progress_bar():
-    t = ft.Text(value="")
-    t2 = ft.Text(value = "0")
-    pb = ft.ProgressBar(value=0)
-    # img = "https://picsum.photos/200/200?0"
-    def button_clicked(e):
-        t.value = "Downloading"
-        t.update()
-        b.disabled = True
-        b.update()
-        
-        for i in range(0, 101):
-            # view.content.controls[0].image_src = f"https://picsum.photos/id/{i+10}/200/300"
-            # view.content.controls[0].image_opacity = 0.2
-            t2.value = i
-            pb.value = i * 0.01
-            time.sleep(0.1)
-            view.update()
-            t2.update()
-            pb.update()
-        t.value = ""
-        t2.value = ""
-        t.update()
-        b.disabled = False
-        b.update()
-    
-    b = ft.ElevatedButton("Download Playlist", width=200000, on_click=button_clicked)
-    view = ft.Container(
-        
-        content = ft.Column(
-            [
-                b,
-                ft.Container(
-                    # image_src=img,
-                    # image_opacity= 0,
-                    # image_fit= ft.ImageFit.COVER,
-                    padding=10,
-                    content=ft.Column([
-                        ft.Divider(opacity=0),
-                        t, 
-                        pb,
-                        t2,
-                        ft.Divider(opacity=0)]),
-                        
-                    )
-                
-            ],)
+
+
+directory_path = ft.Text("", size=14, color=ft.Colors.with_opacity(0.7, ft.Colors.ON_SURFACE))
+
+
+def set_theme(e, color):
+    e.control.page.theme = ft.Theme(color_scheme_seed=color)
+    e.control.page.theme_mode = ft.ThemeMode.SYSTEM
+    e.control.page.update()
+
+
+def popup(page, text):
+    dlg = ft.AlertDialog(
+        title=ft.Text(text),
+        on_dismiss=lambda e: None,
     )
-    return view
-        
-   
+    return dlg
+
+
+def show_dialog(page, dialog):
+    """Open a dialog compatibly across flet versions (open vs show_dialog)."""
+    open_fn = getattr(page, "open", None) or getattr(page, "show_dialog", None)
+    if open_fn is not None:
+        open_fn(dialog)
+
+
 class GestureDetector:
     def __init__(self):
         self.detector = ft.GestureDetector(
             on_pan_update=self.on_pan_update
         )
-    def on_pan_update(self,e):
-        if e.delta_x<0:
+
+    def on_pan_update(self, e):
+        if e.delta_x < 0:
             switch_to_sp_tab(e)
-        elif e.delta_x>0:
+        elif e.delta_x > 0:
             switch_to_yt_tab(e)
+
+
 def navigation_drawer():
     spotify_client_id = ft.TextField(keyboard_type=ft.KeyboardType.TEXT)
     spotify_client_secret = ft.TextField(keyboard_type=ft.KeyboardType.TEXT)
-    spotify_client_id.value = os.getenv('SPOTIPY_CLIENT_ID')
-    spotify_client_secret.value = os.getenv('SPOTIPY_CLIENT_SECRET')
+    spotify_client_id.value = get_setting("SPOTIPY_CLIENT_ID") or ""
+    spotify_client_secret.value = get_setting("SPOTIPY_CLIENT_SECRET") or ""
+
     def save_app_settings(e):
         try:
-            env_str = "SPOTIPY_CLIENT_ID=" + spotify_client_id.value + "\nSPOTIPY_CLIENT_SECRET=" + spotify_client_secret.value
-            with open(".env", "a+") as f:
-                f.seek(0)  # Move the cursor to the beginning of the file
-                f.truncate()  # Clear the file content
-                f.write(env_str)
-        except Exception as e:
-            print(e)
+            set_setting("SPOTIPY_CLIENT_ID", spotify_client_id.value)
+            set_setting("SPOTIPY_CLIENT_SECRET", spotify_client_secret.value)
+        except Exception as err:
+            print(err)
             return "app settings update failed"
         return "app settings updated"
+
     def yt_page_launch(e):
         e.control.page.launch_url('https://youtu.be/vT43uBHq974')
+
     def petreon_page_launch(e):
         e.control.page.launch_url('https://www.patreon.com/c/Predacons')
+
     def github_page_launch(e):
         e.control.page.launch_url('https://github.com/shouryashashank/Trackster')
+
     def email_page_launch(e):
         e.control.page.launch_url('https://www.patreon.com/messages/ffd73e51aa264a61842c446763dbaff9?mode=campaign&tab=chats')
+
     def close_end_drawer(e):
         e.control.page.end_drawer = end_drawer
         end_drawer.open = False
         e.control.page.update()
+
     end_drawer = ft.NavigationDrawer([
         ft.SafeArea(
             ft.Column(
@@ -488,7 +581,7 @@ def navigation_drawer():
                     ft.Row(
                         [
                             ft.Text(""),
-                            ft.IconButton(icon=ft.icons.CLOSE,on_click=close_end_drawer)
+                            ft.IconButton(icon=ft.Icons.CLOSE, on_click=close_end_drawer)
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN
                     ),
@@ -496,54 +589,49 @@ def navigation_drawer():
                     spotify_client_id,
                     ft.Text("Spotify client secret:"),
                     spotify_client_secret,
-                    ft.ElevatedButton("Save",on_click=save_app_settings),
-                    ft.TextButton("How To Get Spotify api api Keys",on_click=yt_page_launch),
-                    ft.TextButton("Contact support",on_click=email_page_launch),
-                    ft.TextButton("Get version with api key already added.",on_click=petreon_page_launch),
-                    ft.TextButton("Help me buy a new phone",on_click=petreon_page_launch),
-                    ft.TextButton("See source code",on_click=github_page_launch)
+                    ft.Button("Save", on_click=save_app_settings),
+                    ft.TextButton("How To Get Spotify api api Keys", on_click=yt_page_launch),
+                    ft.TextButton("Contact support", on_click=email_page_launch),
+                    ft.TextButton("Get version with api key already added.", on_click=petreon_page_launch),
+                    ft.TextButton("Help me buy a new phone", on_click=petreon_page_launch),
+                    ft.TextButton("See source code", on_click=github_page_launch)
 
                 ]
             ),
-            minimum_padding= 10,
+            minimum_padding=10,
         )
     ])
-    
+
     def open_end_drawer(e):
         e.control.page.end_drawer = end_drawer
         end_drawer.open = True
         e.control.page.update()
 
     return open_end_drawer
-    
 
-def popup(page,text):
-    return ft.AlertDialog(
-        title=ft.Text(text),
-        on_dismiss=lambda e: page.add(ft.Text("Non-modal dialog dismissed")),
-    )
-
-def drop_down():
-    
-    return ft.Dropdown(
-            label="Song Exist Action",
-            hint_text="What to do when that song already exist in your directory?",
-            options=[
-                ft.dropdown.Option("Replace all"),
-                ft.dropdown.Option("Skip all"),
-            ],
-            autofocus=True,
-        )
 
 def app_bar():
     view = ft.AppBar(
-        title=ft.Text("Trackster"),
+        title=ft.Row(
+            [
+                ft.Icon(ft.Icons.MUSIC_NOTE, color=ft.Colors.PRIMARY),
+                ft.Text("Trackster", weight=ft.FontWeight.BOLD, size=22),
+            ],
+            spacing=8,
+        ),
         actions=[
-            ft.IconButton(ft.icons.MENU, style=ft.ButtonStyle(padding=0),on_click=navigation_drawer())
+            ft.IconButton(
+                ft.Icons.MENU,
+                style=ft.ButtonStyle(padding=10),
+                tooltip="Settings",
+                on_click=navigation_drawer(),
+            )
         ],
-        bgcolor=ft.colors.with_opacity(0.04, ft.cupertino_colors.SYSTEM_BACKGROUND),
+        center_title=False,
+        bgcolor=ft.Colors.with_opacity(0.04, ft.CupertinoColors.SYSTEM_BACKGROUND),
     )
     return view
+
 
 def handle_nav_change(e):
     if e.control.selected_index == 0:
@@ -554,39 +642,59 @@ def handle_nav_change(e):
         switch_to_am_tab(e)
     elif e.control.selected_index == 3:
         switch_to_search_tab(e)
+
+
 def nav_bar():
     view = ft.NavigationBar(
         destinations=[
-            ft.NavigationBarDestination(icon=ft.icons.ONDEMAND_VIDEO_ROUNDED, label="Youtube"),
-            ft.NavigationBarDestination(icon=ft.icons.MUSIC_NOTE, label="Spotify"),
-            ft.NavigationBarDestination(icon=ft.icons.APPLE_OUTLINED, label="Apple Music"),
-            ft.NavigationBarDestination(icon=ft.icons.SEARCH, label="Search"),
+            ft.NavigationBarDestination(icon=ft.Icons.ONDEMAND_VIDEO_ROUNDED, label="Youtube"),
+            ft.NavigationBarDestination(icon=ft.Icons.MUSIC_NOTE, label="Spotify"),
+            ft.NavigationBarDestination(icon=ft.Icons.APPLE_OUTLINED, label="Apple Music"),
+            ft.NavigationBarDestination(icon=ft.Icons.SEARCH, label="Search"),
         ],
         on_change=handle_nav_change,
-        border=ft.Border(
-            top=ft.BorderSide(color=ft.cupertino_colors.SYSTEM_GREY2, width=0)
-        ),
+        border=ft.Border(top=ft.BorderSide(color=ft.CupertinoColors.SYSTEM_GREY2, width=0)),
+        indicator_color=ft.Colors.PRIMARY_CONTAINER,
+        bgcolor=ft.Colors.SURFACE,
     )
-    return view 
+    return view
 
 
 class FolderPicker(ft.Row):
     def build(self):
         view = ft.Row(
-                [
-                    ft.ElevatedButton(
-                        "Select Folder",
-                        icon=ft.icons.FOLDER_OPEN,
-                        on_click=lambda _: get_directory_dialog.get_directory_path()
+            [
+                ft.Button(
+                    "Select Folder",
+                    icon=ft.Icons.FOLDER_OPEN,
+                    on_click=pick_folder,
+                    style=ft.ButtonStyle(
+                        shape=ft.RoundedRectangleBorder(radius=10),
+                        padding=ft.Padding(16, 12, 16, 12),
                     ),
-                    directory_path,
-                    # ft.Text(value="Select Output Direcotry to save the playlist", italic=False, selectable=False, style='labelSmall', ),
-                ]
-            )
+                ),
+                ft.Container(
+                    content=ft.Row(
+                        [
+                            ft.Icon(ft.Icons.FOLDER, size=18, color=ft.Colors.PRIMARY),
+                            directory_path,
+                        ],
+                        spacing=6,
+                    ),
+                    padding=ft.Padding(10, 8, 10, 8),
+                    bgcolor=ft.Colors.with_opacity(0.06, ft.Colors.ON_SURFACE),
+                    border_radius=8,
+                    expand=True,
+                ),
+            ],
+            spacing=12,
+        )
         return view
+
+
 def switch_to_yt_tab(e):
-    e.control.page.title= "Youtube"
-    set_theme(e,"Red")
+    e.control.page.title = "Youtube"
+    set_theme(e, "Red")
     e.control.page.youtube_tab.visible = True
     e.control.page.spotify_tab.visible = False
     e.control.page.apple_music_tab.visible = False
@@ -594,9 +702,10 @@ def switch_to_yt_tab(e):
     e.control.page.navigation_bar.selected_index = 0
     e.control.page.update()
 
+
 def switch_to_sp_tab(e):
-    e.control.page.title= "Spotify"
-    set_theme(e,"Green")
+    e.control.page.title = "Spotify"
+    set_theme(e, "Green")
     e.control.page.youtube_tab.visible = False
     e.control.page.spotify_tab.visible = True
     e.control.page.apple_music_tab.visible = False
@@ -604,15 +713,17 @@ def switch_to_sp_tab(e):
     e.control.page.navigation_bar.selected_index = 1
     e.control.page.update()
 
+
 def switch_to_am_tab(e):
-    e.control.page.title= "Apple Music"
-    set_theme(e,"Blue")
+    e.control.page.title = "Apple Music"
+    set_theme(e, "Blue")
     e.control.page.youtube_tab.visible = False
     e.control.page.spotify_tab.visible = False
     e.control.page.apple_music_tab.visible = True
     e.control.page.search_tab.visible = False
     e.control.page.navigation_bar.selected_index = 2
     e.control.page.update()
+
 
 def switch_to_search_tab(e):
     e.control.page.title = "Search"
@@ -624,850 +735,552 @@ def switch_to_search_tab(e):
     e.control.page.navigation_bar.selected_index = 3
     e.control.page.update()
 
-def get_track_info(track_url, sp, max_retries=3, initial_timeout=1):
-    """
-    Get track metadata from Spotify with retry logic for timeouts.
-    
-    Args:
-        track_url (str): Spotify track URL
-        sp: Authenticated Spotipy client
-        max_retries (int): Maximum number of retry attempts
-        initial_timeout (float): Initial timeout between retries in seconds (will exponentially increase)
-    
-    Returns:
-        dict: Track metadata or None if all attempts fail
-    """
-    last_exception = None
-    
-    for attempt in range(max_retries + 1):  # +1 for the initial attempt
-        try:
-            track = sp.track(track_url)
-            isrc = track["external_ids"].get("isrc") if track.get("external_ids") else None
 
-            track_metadata = {
-                "artist_name": track["artists"][0]["name"],
-                "track_title": track["name"],
-                "track_number": track["track_number"],
-                "isrc": isrc,
-                "album_art": track["album"]["images"][1]["url"],
-                "album_name": track["album"]["name"],
-                "release_date": track["album"]["release_date"],
-                "artists": [artist["name"] for artist in track["artists"]],
-            }
-            
-            return track_metadata
-            
-        except Exception as e:
-            last_exception = e
-            if attempt < max_retries:
-                wait_time = initial_timeout * (2 ** attempt)  # Exponential backoff
-                print(f"Attempt {attempt + 1} failed. Retrying in {wait_time} seconds... Error: {str(e)}")
-                time.sleep(wait_time)
-            continue
-    
-    # If we get here, all attempts failed
-    print(f"Failed to get track info after {max_retries + 1} attempts. Last error: {str(last_exception)}")
-    return None
+# --------------------------------------------------------------------------
+# Downloader views (run heavy work off the UI thread)
+# --------------------------------------------------------------------------
 
-def find_youtube(query):
-    query = query.replace("é", "e")
-    query = query.replace("’", "")
-    query = query.replace("æ", "ae")
-    query = query.replace("ñ", "n")
-    query = query.replace("–", "+")
-    query = query.replace("‘", "")
-    query = query.replace("ú", "u")
-    
+def _download_view(label, do_work):
+    """Build a progress container whose button runs do_work() in a thread."""
+    t = ft.Text(value="", size=14, color=ft.Colors.ON_SURFACE_VARIANT)
+    t2 = ft.Text(value="0", size=13, color=ft.Colors.with_opacity(0.6, ft.Colors.ON_SURFACE))
+    pb = ft.ProgressBar(value=0, color=ft.Colors.PRIMARY, bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.PRIMARY))
+    b = ft.FilledButton(
+        label,
+        icon=ft.Icons.DOWNLOAD,
+        style=ft.ButtonStyle(
+            shape=ft.RoundedRectangleBorder(radius=10),
+            padding=ft.Padding(20, 12, 20, 12),
+        ),
+    )
 
-    phrase = query.replace(" ", "+")
-    search_link = "https://www.youtube.com/results?search_query=" + phrase
-    count = 0
-    while count < 5:
-        try:
-            search_link = str(URL(search_link))
-            response = urllib.request.urlopen(search_link)
-            break
-        except:
-            count += 1
-    else:
-        raise ValueError("Please check your internet connection and try again later.")
-        
+    def button_clicked(e):
+        page = e.control.page
+        b.disabled = True
+        b.update()
 
-    search_results = re.findall(r"watch\?v=(\S{11})", response.read().decode())
-    first_vid = "https://www.youtube.com/watch?v=" + search_results[0]
+        def runner():
+            try:
+                do_work(page, t, t2, pb)
+            except Exception as err:
+                print(err)
+                show_dialog(page, popup(page, "⚠️ Failed to download. make sure all the options are properly selected, and the link is correct. restart and try again"))
+            finally:
+                b.disabled = False
+                b.update()
 
-    return first_vid
+        page.run_thread(runner)
 
-def get_playlist_info(sp_playlist,sp):
-    res = requests.get(sp_playlist)
-    if res.status_code != 200:
-        raise ValueError("Invalid Spotify playlist URL")
-    pl = sp.playlist(sp_playlist)
-    if not pl["public"]:
-        raise ValueError(
-            "Can't download private playlists. Change your playlist's state to public."
-        )
-    playlist = sp.playlist_tracks(sp_playlist)
+    b.on_click = button_clicked
+    view = ft.Container(
+        content=ft.Card(
+            content=ft.Container(
+                padding=16,
+                content=ft.Column(
+                    [
+                        b,
+                        ft.Divider(height=12, opacity=0),
+                        t,
+                        pb,
+                        ft.Row([t2], alignment=ft.MainAxisAlignment.END),
+                    ],
+                    spacing=8,
+                ),
+            )
+        ),
+        width=float("inf"),
+    )
+    return view
 
-    tracks_item = playlist['items']
 
-    while playlist['next']:
-        playlist = sp.next(playlist)
-        tracks_item.extend(playlist['items'])
+def _set_spotify_for_work(page):
+    sp = get_spotify_client()
+    state.use_spotify_for_metadata = sp is not None
+    if sp is None:
+        show_dialog(page, popup(page, "⚠️ Failed to connect to Spotify API. Continuing without Spotify API, some song metadata will not be added"))
+    return sp
 
-    tracks = [item["track"] for item in tracks_item]
-    tracks_info = []
-    track_id = []
-    # load tracks_id from synced.txt
-    if os.path.exists("synced.txt"):
-        with open("synced.txt", "r") as f:
-            track_id = f.read().splitlines()
-    updated_tracks = []
-    try:
-        for track in tqdm(tracks):
-            # check if the track['id'] is not none
-            if track["id"] is None:
+
+def _custom_label(exists_action):
+    custom_labels = {
+        "Replace all": "RA",
+        "Skip all": "SA",
+        "Determine while downloading from CLI": "",
+    }
+    return custom_labels.get(exists_action, "")
+
+
+def youtube_downloader(url, dd, c1):
+    def do_work(page, t, t2, pb):
+        link = url.value
+        state.file_exists_action = _custom_label(dd.value)
+        sp = _set_spotify_for_work(page)
+
+        t.value = "Downloading"
+        t.update()
+        yt_playlist = Playlist(link)
+
+        totalVideoCount = len(yt_playlist.videos)
+        print("Total videos in playlist: 🎦", totalVideoCount)
+
+        for index, video in enumerate(yt_playlist.videos):
+            try:
+                if c1.value:
+                    if video.title not in get_failed_titles():
+                        continue
+                print("Downloading: " + video.title)
+                t2.value = f"{index+1}/{totalVideoCount}"
+                pb.value = ((index + 1) / totalVideoCount)
+                t.value = "Downloading: " + video.title
+                t.update()
+                t2.update()
+                pb.update()
+
+                audio = download_yt(video, video.title)
+                if audio:
+                    if sp is not None:
+                        try:
+                            track_url = search_spotify(f"{video.author} {video.title}", sp)
+                        except Exception as e:
+                            print(e)
+                            track_url = None
+                        track_info = get_track_info_spotify(track_url, sp) if track_url else get_track_info_youtube(video)
+                    else:
+                        track_info = get_track_info_youtube(video)
+
+                    set_metadata(track_info, audio, "")
+                    final_path = f"{state.music_folder_path}{os.path.basename(audio)}"
+                    os.replace(audio, final_path)
+                    add_downloaded(video.title, final_path, "youtube")
+                    remove_failed(video.title)
+            except Exception as e:
+                print(f"Failed to download {video.title} due to: {e}")
+                add_failed(video.title)
                 continue
+        t.value = "Downloaded"
+        t2.value = ""
+        t.update()
+        print("All videos downloaded successfully!")
 
-            if track["id"] in track_id:
+    return _download_view("Download Playlist", do_work)
+
+
+def spotify_downloader(url, dd, c1, c2):
+    def do_work(page, t, t2, pb):
+        link = url.value
+        state.file_exists_action = _custom_label(dd.value)
+        sp = _set_spotify_for_work(page)
+        if sp is None:
+            t.value = "Spotify API credentials are required to read playlists/albums. Open the menu (top-right) and add your Spotify Client ID and Secret, then retry."
+            t.update()
+            return
+
+        t.value = "Fetching Playlist meta data (dont freak out if it takes a while 😅 it will take about a minute for 300 songs)"
+        t.update()
+
+        if "track" in link:
+            songs = [get_track_info(link, sp)]
+        elif "playlist" in link:
+            songs = get_playlist_info(link, sp)
+        else:
+            songs = get_album_info(link, sp)
+        if not songs:
+            t.value = "No songs to download."
+            t.update()
+            return
+
+        t.value = "Starting Download"
+        t.update()
+        downloaded_names = set()
+
+        totalVideoCount = len(songs)
+        for i, track_info in enumerate(songs):
+            try:
+                if dd.value == "Skip all":
+                    if os.path.exists(f"{state.music_folder_path}{track_info['track_title']}.mp3"):
+                        print("Skipping: " + track_info["track_title"])
+                        continue
+                if c1.value:
+                    if track_info["track_title"] not in get_failed_titles():
+                        continue
+                print("Downloading: " + track_info["track_title"])
+                t2.value = f"{i+1}/{totalVideoCount}"
+                pb.value = ((i + 1) / totalVideoCount)
+                t.value = "Downloading: " + track_info["track_title"]
+                t.update()
+                t2.update()
+                pb.update()
+                if track_info["track_title"] in downloaded_names:
+                    continue
+
+                search_term = f"{track_info['artist_name']} {track_info['track_title']} audio"
+                hq_search_term = f"{track_info['track_title']} {track_info['artist_name']} {track_info['album_name']}"
+                lyrics = ""
+                if c2.value:
+                    song = download_high_quality(hq_search_term)
+                    if song == "File already exists.":
+                        print("Skipping: " + track_info["track_title"])
+                        continue
+                    if song is None:
+                        try:
+                            print("No songs found for the query in high quality song server.", search_term)
+                            print("Trying to download from youtube")
+                            video_link = find_youtube(search_term)
+                            yt = YouTube(video_link)
+                            audio = download_yt(yt, search_term)
+                        except Exception:
+                            print("No songs found for the query in high quality song server.", search_term)
+                            add_failed(track_info["track_title"])
+                            print("Skipping... adding to failed downloads. redownload with low quality in next run")
+                            continue
+                    else:
+                        artist = song['song'] + " " + song['primary_artists'] + " " + song['album']
+                        diff_ratio = difflib.SequenceMatcher(None, artist.lower(), (track_info['track_title'] + " " + track_info["artist_name"] + " " + track_info["album_name"]).lower()).ratio()
+                        if diff_ratio < 0.7:
+                            try:
+                                print("songs found for the query in high quality song server. very different from the one in spotify", search_term)
+                                print("Trying to download from youtube")
+                                video_link = find_youtube(search_term)
+                                yt = YouTube(video_link)
+                                audio = download_yt(yt, search_term)
+                            except Exception:
+                                print("No songs found for the query in high quality song server.", search_term)
+                                add_failed(track_info["track_title"])
+                                print("Skipping... adding to failed downloads. redownload with low quality in next run")
+                                continue
+                        elif diff_ratio < 0.9:
+                            print("Artist name mismatch. Skipping...")
+                            add_mismatch(track_info["track_title"], track_info["artist_name"], artist)
+                            continue
+                        audio = song["mp3"]
+                        lyrics = song["lyrics"]
+                else:
+                    video_link = find_youtube(search_term)
+                    yt = YouTube(video_link)
+                    audio = download_yt(yt, search_term)
+                if audio:
+                    set_metadata(track_info, audio, lyrics)
+                    sanitized_title = sanitize_filename(track_info['track_title'])
+                    destination_path = os.path.join(state.music_folder_path, f"{sanitized_title}.mp3")
+                    os.replace(audio, destination_path)
+                    downloaded_names.add(track_info["track_title"])
+                    add_downloaded(track_info["track_title"], destination_path, "spotify")
+                    remove_failed(track_info["track_title"])
+                else:
+                    print("File exists. Skipping...")
+            except Exception as e:
+                tt = track_info["track_title"]
+                print(f"Failed to download {tt} due to: {e}")
+                add_failed(tt)
                 continue
-            
-            updated_tracks.append(track["id"])
+        t.value = "Downloaded"
+        t2.value = ""
+        t.update()
+        print("All songs downloaded successfully!")
+        show_dialog(page, popup(page, "All songs downloaded successfully!"))
 
-            track_url = f"https://open.spotify.com/track/{track['id']}"
-            track_info = get_track_info(track_url,sp)
-            # make a progress bar
-            
-            tracks_info.append(track_info)
-    except Exception as e:
-        print(f"Failed to get track info for {track['name']} due to: {e}")
-    # save the updated tracks_id to synced_updated.txt
-    try:
-        with open("synced_updated.txt", "w") as f:
-            f.write("\n".join(updated_tracks))
-    except Exception as e:
-        print(f"Failed to save updated tracks: {e}")
-    return tracks_info
+    return _download_view("Download Playlist", do_work)
 
-def get_album_info(sp_album,sp):
-    res = requests.get(sp_album)
-    if res.status_code != 200:
-        raise ValueError("Invalid Spotify playlist URL")
-    # pl = sp.album(sp_album)
-    
-    playlist = sp.album_tracks(sp_album)
 
-    tracks_item = playlist['items']
+def apple_music_downloader(url, dd, c1, c2):
+    def do_work(page, t, t2, pb):
+        link = url.value
+        state.file_exists_action = _custom_label(dd.value)
+        sp = _set_spotify_for_work(page)
 
-    while playlist['next']:
-        playlist = sp.next(playlist)
-        tracks_item.extend(playlist['items'])
+        t.value = "Fetching Playlist meta data (dont freak out if it takes a while 😅 it will take about a minute for 100 songs)"
+        t.update()
 
-    # tracks = [item["track"] for item in tracks_item]
-    tracks_info = []
-    track_id = []
-    # load tracks_id from synced.txt
-    if os.path.exists("synced.txt"):
-        with open("synced.txt", "r") as f:
-            track_id = f.read().splitlines()
-    updated_tracks = []
-    def process_track(track):
-        updated_tracks.append(track["id"])
-        if track["id"] in track_id:
-            return None
-        track_url = f"https://open.spotify.com/track/{track['id']}"
-        return get_track_info(track_url, sp)
+        am_playlist = apple.get_playlist(link)
 
-    with ThreadPoolExecutor() as executor:
-        results = list(tqdm(executor.map(process_track, tracks_item), total=len(tracks_item)))
+        totalVideoCount = len(am_playlist)
+        print("Total songs in playlist:", totalVideoCount)
 
-    tracks_info.extend(filter(None, results))
-        # make a progress bar
-        
-    # save the updated tracks_id to synced_updated.txt
-    with open("synced_updated.txt", "w") as f:
-        f.write("\n".join(updated_tracks))
-    return tracks_info
+        for index, song in enumerate(am_playlist):
+            try:
+                if dd.value == "Skip all":
+                    if os.path.exists(f"{state.music_folder_path}{song}.mp3"):
+                        print("Skipping: " + song)
+                        continue
+                if c1.value:
+                    if song not in get_failed_titles():
+                        continue
+                print("Downloading: " + song)
+                t2.value = f"{index+1}/{totalVideoCount}"
+                pb.value = ((index + 1) / totalVideoCount)
+                t.value = "Downloading: " + song
+                t.update()
+                t2.update()
+                pb.update()
+                lyrics = ""
+                if c2.value:
+                    song_js = download_high_quality(song)
+                    if song_js == "File already exists.":
+                        print("Skipping: " + song)
+                        continue
+                    if song_js is None:
+                        try:
+                            print("No songs found for the query in high quality song server.", song)
+                            print("Trying to download from youtube")
+                            video_link = find_youtube(song)
+                            yt = YouTube(video_link)
+                            audio = download_yt(yt, song)
+                        except Exception:
+                            print("No songs found for the query in high quality song server.", song)
+                            add_failed(song)
+                            print("Skipping... adding to failed downloads. redownload with low quality in next run")
+                            continue
+                    else:
+                        audio = song_js["mp3"]
+                        lyrics = song_js["lyrics"]
+                else:
+                    video_link = find_youtube(song)
+                    yt = YouTube(video_link)
+                    audio = download_yt(yt, song)
+                if audio:
+                    if sp is not None:
+                        try:
+                            spotify_search_term = song.replace(" by", "").replace(" audio", "")
+                            track_url = search_spotify(spotify_search_term, sp)
+                        except Exception as e:
+                            print(e)
+                            track_url = None
+                        track_info = get_track_info_spotify(track_url, sp) if track_url else get_track_info_youtube(yt)
+                    else:
+                        track_info = get_track_info_youtube(yt)
+
+                    set_metadata(track_info, audio, lyrics)
+                    final_path = f"{state.music_folder_path}{os.path.basename(audio)}"
+                    os.replace(audio, final_path)
+                    add_downloaded(song, final_path, "apple_music")
+                    remove_failed(song)
+            except Exception as e:
+                print(f"Failed to download {song} due to: {e}")
+                add_failed(song)
+                continue
+        t.value = "Downloaded"
+        t2.value = ""
+        t.update()
+        print("All songs downloaded successfully!")
+        show_dialog(page, popup(page, "All songs downloaded successfully!"))
+
+    return _download_view("Download Playlist", do_work)
+
+
+# --------------------------------------------------------------------------
+# App entry point
+# --------------------------------------------------------------------------
 
 def main(page: ft.Page):
+    init_db()
+    migrate_env()
+
     page.adaptive = True
     page.appbar = app_bar()
     page.navigation_bar = nav_bar()
-    # hide all dialogs in overlay
+    page.theme = ft.Theme(color_scheme_seed="Red")
+
     folder_picker = FolderPicker()
     url = ft.TextField(keyboard_type=ft.KeyboardType.TEXT)
-    pb = ft.ProgressBar()
+    dd = ft.Dropdown(
+        label="Song Exist Action",
+        hint_text="What to do when that song already exist in your directory?",
+        options=[
+            ft.dropdown.Option("Replace all"),
+            ft.dropdown.Option("Skip all"),
+        ],
+        autofocus=True,
+    )
     c1 = ft.Checkbox(label="Download only failed songs", value=False)
     c2 = ft.Checkbox(label="Download high quality audio", value=False)
-    # c2 = ft.Checkbox(label="Download high quality audio (🙏 please get it from petreon or build from source to eneble this)", value=False,disabled=True)
-    # def switch_to_yt_tab(e):
-    #     page.title= "Youtube"
-    #     youtube_tab.visible = True
-    #     spotify_tab.visible = False
-    #     page.navigation_bar.selected_index = 0
-    #     page.update
-    
-    # def switch_to_sp_tab(e):
-    #     page.title= "Spotify"
-    #     youtube_tab.visible = False
-    #     spotify_tab.visible = True
-    #     page.navigation_bar.selected_index = 1
-    #     page.update
-    page.theme = ft.Theme(color_scheme_seed="Red")   
     gesture_detector = GestureDetector()
-    dd = ft.Dropdown(
-            label="Song Exist Action",
-            hint_text="What to do when that song already exist in your directory?",
-            options=[
-                ft.dropdown.Option("Replace all"),
-                ft.dropdown.Option("Skip all"),
-            ],
-            autofocus=True,
-        )
-    # link = "https://www.youtube.com/watch?v=uelHwf8o7_U&list=PLGyF7r13ifSqeOxzefZfjiSgSoBK2W4fQ"
-    # exists_action ="Replace all"
-    def downloader():
-        try:
-            t = ft.Text(value="")
-            t2 = ft.Text(value = "0")
-            pb = ft.ProgressBar(value=0)
-            def button_clicked(e):
-                link = url.value
-                exists_action = dd.value
-                t.value = "Downloading"
-                t.update()
-                b.disabled = True
-                b.update()
-                custom_labels = {
-                    "Replace all": "RA",
-                    "Skip all": "SA",
-                    "Determine while downloading from CLI": "",
-                }
-                global file_exists_action 
-                file_exists_action = custom_labels[exists_action]
-                use_spotify_for_metadata = True
-                try:
-                    load_dotenv()
-                    SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
-                    SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
-                    client_credentials_manager = SpotifyClientCredentials(
-                        client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET
-                    )
-                    sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
-                except Exception as e:
-                    use_spotify_for_metadata = False
-                    print(f"Failed to connect to Spotify API: {e}")
-                    print("Continuing without Spotify API, some song metadata will not be added")
-                    exception_popup = popup(page,f"⚠️ Failed to connect to Spotify API: {e}  .  Continuing without Spotify API, some song metadata will not be added")
-                    page.open(exception_popup)
-                # link = input("Enter YouTube Playlist URL: ✨")
 
-                yt_playlist = Playlist(link)
+    def tab_layout(folder_picker, url, dd, label):
+        return [
+            ft.Card(
+                content=ft.Container(
+                    padding=16,
+                    content=ft.Column(
+                        [
+                            folder_picker,
+                            ft.Divider(height=16, opacity=0),
+                            ft.Text(label, size=14, color=ft.Colors.ON_SURFACE_VARIANT),
+                            url,
+                            ft.Divider(height=12, opacity=0),
+                            dd,
+                        ],
+                        spacing=6,
+                    ),
+                )
+            ),
+            ft.Divider(height=12, opacity=0),
+        ]
 
-
-
-                totalVideoCount = len(yt_playlist.videos)
-                print("Total videos in playlist: 🎦", totalVideoCount)
-
-                for index, video in enumerate(yt_playlist.videos):
-                    try:
-                        if c1.value:
-                            if os.path.exists("failed_downloads.txt"):
-                                with open("failed_downloads.txt", "r") as f:
-                                    failed_songs = f.read().splitlines()
-                                if video.title not in failed_songs:
-                                    continue
-                        print("Downloading: "+video.title)
-                        t2.value = f"{index+1}/{totalVideoCount}"
-                        pb.value = ((index+1)/totalVideoCount)
-                        
-                        view.update()
-                        t2.update()
-                        pb.update()
-                    
-                        audio = download_yt(video,video.title)
-                        if audio:
-                            if(use_spotify_for_metadata):
-                                try:
-                                    track_url = search_spotify(f"{video.author} {video.title}",sp)
-                                except Exception as e:
-                                    print(e)
-                                    track_url = None
-                                if not track_url:
-                                    track_info = get_track_info_youtube(video)
-                                else:
-                                    track_info = get_track_info_spotify(track_url,sp)
-                            else:
-                                track_info = get_track_info_youtube(video)
-
-                            set_metadata(track_info, audio,"")
-                            os.replace(audio, f"{music_folder_path}{os.path.basename(audio)}")
-                    except Exception as e:
-                        print(f"Failed to download {video.title} due to: {e}")
-                        with open("failed_downloads.txt", "a") as f:
-                            f.write(f"{video.title}\n")
-                        continue
-                t.value = "Downloaded"
-                t2.value = ""
-                t.update()
-                b.disabled = False
-                b.update()
-                print("All videos downloaded successfully!")
-            b = ft.ElevatedButton("Download Playlist", width=200000, on_click=button_clicked)
-            view = ft.Container(
-                
-                content = ft.Column(
-                    [
-                        b,
-                        ft.Container(
-                            # image_src=img,
-                            # image_opacity= 0,
-                            # image_fit= ft.ImageFit.COVER,
-                            padding=10,
-                            content=ft.Column([
-                                ft.Divider(opacity=0),
-                                t, 
-                                pb,
-                                t2,
-                                ft.Divider(opacity=0)]),
-                                
-                            )
-                        
-                    ],)
-            )
-            return view
-            # return "All videos downloaded successfully!"
-        except Exception as e:
-            print(e)
-            exception_popup = popup(page,f"⚠️ Failed to download. make sure all the options are properly selected, and the link is correct. restart and try again")
-            page.open(exception_popup)
-
-    def downloader_spotify():
-        t = ft.Text(value="")
-        t2 = ft.Text(value = "0")
-        pb = ft.ProgressBar(value=0)
-        def button_clicked(e):
-            print("Downloading: here you will se a progress bar. if that progress bar is stuck that means, spotify is rate limiting you. wait for a while and try again or download the 'no spotify key' version. for now there is no work around this. sorry for the inconvenience")
-            link = url.value
-            exists_action = dd.value
-            t.value = "Fetching Playlist meta data (dont freak out if it takes a while 😅 it will take about a minute for 300 songs)"
-            t.update()
-            b.disabled = True
-            b.update()
-            try:
-                custom_labels = {
-                    "Replace all": "RA",
-                    "Skip all": "SA",
-                    "Determine while downloading from CLI": "",
-                }
-                global file_exists_action 
-                file_exists_action = custom_labels[exists_action]
-                use_spotify_for_metadata = True
-                try:
-                    load_dotenv()
-                    SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
-                    SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
-                    client_credentials_manager = SpotifyClientCredentials(
-                        client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET
-                    )
-                    sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
-                except Exception as e:
-                    use_spotify_for_metadata = False
-                    print(f"Failed to connect to Spotify API: {e}")
-                    print("Continuing without Spotify API, some song metadata will not be added")
-                    exception_popup = popup(page,f"⚠️ Failed to connect to Spotify API: {e}  .  Continuing without Spotify API, some song metadata will not be added")
-                    page.open(exception_popup)
-                # link = input("Enter YouTube Playlist URL: ✨")
-            
-                if "track" in link:
-                    songs = [get_track_info(link,sp)]
-                elif "playlist" in link:
-                    songs = get_playlist_info(link,sp)
-                else:
-                    songs = get_album_info(link,sp)
-                # pickle the songs list
-                # with open("songs.pkl", "wb") as f:
-                #     pickle.dump(songs, f)
-                # with open("songs.pkl", "rb") as f:
-                #     songs = pickle.load(f)
-                t.value = "Starting Download"
-                t.update()
-                downloaded = 0
-                song_name_list = []
-                if os.path.exists("song_names.txt"):
-                    if input("only download the songs that are not already downloaded [y/n]: ").strip() == "y":  
-                        with open("song_names.txt", "r") as f:
-                            song_name_list = f.read().splitlines()
-                # check if downloaded.txt exists
-                # if os.path.exists("downloaded.txt"):
-                #     if input("Resume download? [y/n]: ").strip() == "y":  
-                #         with open("downloaded.txt", "r") as f:
-                #             downloaded = int(f.read())
-                totalVideoCount = len(songs)
-                for i, track_info in enumerate(songs):
-                    try:
-                        #  check if the song is already downloaded at  f"{music_folder_path}{search_term}.mp3" 
-                        if dd.value == "Skip all":
-                            if os.path.exists(f"{music_folder_path}{track_info['track_title']}.mp3"):
-                                print("Skipping: "+track_info["track_title"])
-                                continue
-                        if c1.value:
-                            if os.path.exists("failed_downloads.txt"):
-                                with open("failed_downloads.txt", "r", encoding="utf-8") as f:
-                                    failed_songs = f.read().splitlines()
-                                if track_info["track_title"] not in failed_songs:
-                                    continue
-                        print("Downloading: "+track_info["track_title"])
-                        t2.value = f"{i+1}/{totalVideoCount}"
-                        pb.value = ((i+1)/totalVideoCount)
-                        t.value = "Downloading: "+track_info["track_title"]
-                        t.update()
-                        view.update()
-                        t2.update()
-                        pb.update()
-                        if track_info["track_title"] in song_name_list:
-                            continue
-                        if downloaded > i:
-                            continue
-                        search_term = f"{track_info['artist_name']} {track_info['track_title']} audio"
-                        hq_search_term = f"{track_info['track_title']} {track_info['artist_name']} {track_info['album_name']}"
-                        lyrics = ""
-                        if c2.value:
-                            song = download_high_quality(hq_search_term)
-                            if song == "No songs found for the query.":
-                                try:
-                                    print("No songs found for the query in high quality song server." , search_term)
-                                    print("Trying to download from youtube")
-                                    video_link = find_youtube(search_term)
-                                    yt = YouTube(video_link)
-                                    audio = download_yt(yt,search_term)
-                                except Exception as e:
-                                    print("No songs found for the query in high quality song server." , search_term)
-                                    tt = track_info["track_title"]
-                                    with open("failed_downloads.txt", "a", encoding="utf-8") as f:
-                                        f.write(f"{tt}\n")
-                                    print("Skipping... adding to failed_downloads.txt redownload with low quality in next run" )
-                                    continue
-                            else:
-                                artist = song['song'] + " " + song['primary_artists'] + " " + song['album']
-                                diff_ratio = difflib.SequenceMatcher(None, artist.lower(), (track_info['track_title'] + " " +track_info["artist_name"]+ " " +track_info["album_name"]).lower()).ratio()
-                                # compare the artist name from the song and the artist name from the track_info
-                                if (diff_ratio<0.7):
-                                    try:
-                                        print("songs found for the query in high quality song server. very different from the one in spotify" , search_term)
-                                        print("Trying to download from youtube")
-                                        video_link = find_youtube(search_term)
-                                        yt = YouTube(video_link)
-                                        audio = download_yt(yt,search_term)
-                                    except Exception as e:
-                                        print("No songs found for the query in high quality song server." , search_term)
-                                        tt = track_info["track_title"]
-                                        with open("failed_downloads.txt", "a", encoding="utf-8") as f:
-                                            f.write(f"{tt}\n")
-                                        print("Skipping... adding to failed_downloads.txt redownload with low quality in next run" )
-                                        continue
-
-                                elif (diff_ratio<0.9):
-                                    print("Artist name mismatch. Skipping...")
-                                    tt = track_info["track_title"]
-                                    aa = track_info["artist_name"]
-                                    with open("mismatched_downloads.txt", "a", encoding="utf-8") as f:
-                                        f.write(f"{tt}    ||   Orignal artist :  {aa}    ||    Downloaded artist:   {artist}\n")
-                                    continue
-                                audio = song["mp3"]
-                                lyrics = song["lyrics"]
-                        else:
-                            video_link = find_youtube(search_term)
-                            yt = YouTube(video_link)
-                            audio = download_yt(yt,search_term)
-                        if audio:
-                            # track_info["track_number"] = downloaded + 1
-                            set_metadata(track_info, audio,lyrics)
-                            sanitized_title = sanitize_filename(track_info['track_title'])
-                            destination_path = os.path.join(music_folder_path, f"{sanitized_title}.mp3")
-                            os.replace(audio, destination_path)
-                            downloaded += 1
-                            # save the downloaded count to a file
-                            with open("downloaded.txt", "w") as f:
-                                f.write(str(downloaded))
-                        else:
-                            print("File exists. Skipping...")
-                    except Exception as e:
-                        tt = track_info["track_title"]
-                        print(f"Failed to download {tt} due to: {e}")
-                        with open("failed_downloads.txt", "a", encoding="utf-8") as f:
-                            f.write(f"{tt}\n")
-                        continue
-                t.value = "Downloaded"
-                t2.value = ""
-                t.update()
-                b.disabled = False
-                b.update()
-                print("All songs downloaded successfully!")
-                print("Few more steps to go. 🚀")
-                print("1. Open the downloaded folder and check if all the songs are downloaded.")
-                print("2. open mismatched_downloads.txt and check if any songs are mismatched. most of them should be fine but still manually check the songs. if it is not the song you wanted, delete the song from the folder.")
-                print("3. restart the app and download again but with high quality audio turned off. this will download the songs from youtube. make sure to select skip all in the song exist action dropdown.")
-                print("4. open failed_downloads.txt and download the songs that are failed to download.")
-                completion_popup = popup(page,"All songs downloaded successfully!\n Few more steps to go. 🚀 \n1. Open the downloaded folder and check if all the songs are downloaded. \n2. open mismatched_downloads.txt and check if any songs are mismatched. most of them should be fine but still manually check the songs. if it is not the song you wanted, delete the song from the folder.\n3. restart the app and download again but with high quality audio turned off. this will download the songs from youtube. make sure to select skip all in the song exist action dropdown.")
-                page.open(completion_popup)
-            except Exception as e:
-                print(e)
-                exception_popup = popup(page,f"⚠️ Failed to download. make sure all the options are properly selected, and the link is correct. restart and try again ({e})")
-                page.open(exception_popup)
-        b = ft.ElevatedButton("Download Playlist", width=200000, on_click=button_clicked)
-        view = ft.Container(
-            
-            content = ft.Column(
+    def _tab(*children, visible=False):
+        return ft.Container(
+            ft.ListView(
                 [
-                    b,
                     ft.Container(
-                        # image_src=img,
-                        # image_opacity= 0,
-                        # image_fit= ft.ImageFit.COVER,
-                        padding=10,
-                        content=ft.Column([
-                            ft.Divider(opacity=0),
-                            t, 
-                            pb,
-                            t2,
-                            ft.Divider(opacity=0)]),
-                            
-                        )
-                    
-                ],)
-        )
-        return view
-    
-    def downloader_apple_music():
-        try:
-            t = ft.Text(value="")
-            t2 = ft.Text(value = "0")
-            pb = ft.ProgressBar(value=0)
-            def button_clicked(e):
-                
-                link = url.value
-                exists_action = dd.value
-                t.value = "Fetching Playlist meta data (dont freak out if it takes a while 😅 it will take about a minute for 100 songs)"
-                t.update()
-                b.disabled = True
-                b.update()
-                custom_labels = {
-                    "Replace all": "RA",
-                    "Skip all": "SA",
-                    "Determine while downloading from CLI": "",
-                }
-                global file_exists_action 
-                file_exists_action = custom_labels[exists_action]
-                use_spotify_for_metadata = True
-                try:
-                    load_dotenv()
-                    SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
-                    SPOTIPY_CLIENT_SECRET = os.getenv('SPOTIPY_CLIENT_SECRET')
-                    client_credentials_manager = SpotifyClientCredentials(
-                        client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET
+                        ft.Column(children, spacing=8),
+padding=ft.Padding(12, 12, 12, 12),
                     )
-                    sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
-                except Exception as e:
-                    use_spotify_for_metadata = False
-                    print(f"Failed to connect to Spotify API: {e}")
-                    print("Continuing without Spotify API, some song metadata will not be added")
-                    exception_popup = popup(page,f"⚠️ Failed to connect to Spotify API: {e}  .  Continuing without Spotify API, some song metadata will not be added")
-                    page.open(exception_popup)
-                # link = input("Enter YouTube Playlist URL: ✨")
+                ],
+                spacing=10,
+                padding=ft.Padding(12, 0, 12, 0),
+            ),
+            visible=visible,
+        )
 
-                am_playlist = apple.get_playlist(link)
+    yt_children = [
+        *tab_layout(folder_picker, url, dd, "Enter Youtube playlist url:"),
+        ft.Row([c1], spacing=10),
+        youtube_downloader(url, dd, c1),
+        gesture_detector.detector,
+    ]
+    sp_children = [
+        *tab_layout(folder_picker, url, dd, "Enter Spotify playlist or album url:"),
+        ft.Row([c1, c2], spacing=14),
+        spotify_downloader(url, dd, c1, c2),
+        gesture_detector.detector,
+    ]
+    am_children = [
+        *tab_layout(folder_picker, url, dd, "Enter Apple Music playlist or album url:"),
+        ft.Row([c1, c2], spacing=14),
+        apple_music_downloader(url, dd, c1, c2),
+        gesture_detector.detector,
+    ]
 
-
-
-                totalVideoCount = len(am_playlist)
-                print("Total songs in playlist:", totalVideoCount)
-
-                for index, song in enumerate(am_playlist):
-                    try:
-                        #  check if the song is already downloaded at  f"{music_folder_path}{search_term}.mp3" 
-                        if dd.value == "Skip all":
-                            if os.path.exists(f"{music_folder_path}{song}.mp3"):
-                                print("Skipping: "+song)
-                                continue
-                        if c1.value:
-                            if os.path.exists("failed_downloads.txt"):
-                                with open("failed_downloads.txt", "r") as f:
-                                    failed_songs = f.read().splitlines()
-                                if song not in failed_songs:
-                                    continue
-                        print("Downloading: "+song)
-                        t2.value = f"{index+1}/{totalVideoCount}"
-                        pb.value = ((index+1)/totalVideoCount)
-                        
-                        view.update()
-                        t2.update()
-                        pb.update()
-                        lyrics = ""
-                        if c2.value:
-                            song_js = download_high_quality(song)
-                            if song_js == "No songs found for the query.":
-                                try:
-                                    print("No songs found for the query in high quality song server." , song)
-                                    print("Trying to download from youtube")
-                                    video_link = find_youtube(song)
-                                    yt = YouTube(video_link)
-                                    audio = download_yt(yt,song)
-                                except Exception as e:
-                                    print("No songs found for the query in high quality song server." , song)
-                                    with open("failed_downloads.txt", "a", encoding="utf-8") as f:
-                                        f.write(f"{song}\n")
-                                    print("Skipping... adding to failed_downloads.txt redownload with low quality in next run" )
-                                    continue
-                            else:
-                                audio = song_js["mp3"]
-                                lyrics = song_js["lyrics"]
-                        else:
-                            video_link = find_youtube(song)
-                            yt = YouTube(video_link)
-                            audio = download_yt(yt,song)
-                        if audio:
-                            if(use_spotify_for_metadata):
-                                try:
-                                    spotify_search_term = song.replace(" by", "").replace(" audio", "")
-                                    track_url = search_spotify(spotify_search_term,sp)
-                                except Exception as e:
-                                    print(e)
-                                    track_url = None
-                                if not track_url:
-                                    track_info = get_track_info_youtube(yt)
-                                else:
-                                    track_info = get_track_info_spotify(track_url,sp)
-                            else:
-                                track_info = get_track_info_youtube(yt)
-
-                            set_metadata(track_info, audio,lyrics)
-                            os.replace(audio, f"{music_folder_path}{os.path.basename(audio)}")
-                    except Exception as e:
-                        print(f"Failed to download {song} due to: {e}")
-                        with open("failed_downloads.txt", "a") as f:
-                            f.write(f"{song}\n")
-                        continue
-                t.value = "Downloaded"
-                t2.value = ""
-                t.update()
-                b.disabled = False
-                b.update()
-                print("All songs downloaded successfully!")
-                print("Few more steps to go. 🚀")
-                print("1. Open the downloaded folder and check if all the songs are downloaded.")
-                print("2. some songs downloaded from the high quality audio server might not be the song you wanted. please check the songs manually and delete the songs that are not the song you wanted.")
-                print("3. restart the app and download again but with high quality audio turned off. this will download the songs from youtube. make sure to select skip all in the song exist action dropdown.")
-                print("4. open failed_downloads.txt and download the songs that are failed to download.")
-                completion_popup = popup(page,"All songs downloaded successfully!\n Few more steps to go. 🚀 \n1. Open the downloaded folder and check if all the songs are downloaded. \n2. some songs downloaded from the high quality audio server might not be the song you wanted. please check the songs manually and delete the songs that are not the song you wanted.\n3. restart the app and download again but with high quality audio turned off. this will download the songs from youtube. make sure to select skip all in the song exist action dropdown.")
-                page.open(completion_popup)
-            b = ft.ElevatedButton("Download Playlist", width=200000, on_click=button_clicked)
-            view = ft.Container(
-                
-                content = ft.Column(
-                    [
-                        b,
-                        ft.Container(
-                            # image_src=img,
-                            # image_opacity= 0,
-                            # image_fit= ft.ImageFit.COVER,
-                            padding=10,
-                            content=ft.Column([
-                                ft.Divider(opacity=0),
-                                t, 
-                                pb,
-                                t2,
-                                ft.Divider(opacity=0)]),
-                                
-                            )
-                        
-                    ],)
-            )
-            return view
-            # return "All videos downloaded successfully!"
-        except Exception as e:
-            print(e)
-            exception_popup = popup(page,f"⚠️ Failed to download. make sure all the options are properly selected, and the link is correct. restart and try again")
-            page.open(exception_popup)
-
-    youtube_tab = ft.Container(
-        ft.SafeArea(
-            content=ft.Column(
-                [
-                    ft.Divider(opacity=0, height= 20),
-                    folder_picker,
-                    ft.Divider(opacity=0, height= 20),
-                    ft.Text("Enter Youtube playlist url:"),
-                    url,
-                    ft.Divider(opacity=0),  
-                    dd,
-                    ft.Divider(opacity=0),
-                    # ft.ElevatedButton(text="Download Playlist",width=200000),
-                    c1,
-                    ft.Divider(opacity=0),
-                    downloader(),
-                    # ft.FilledButton("sp",on_click=switch_to_sp_tab)
-                    gesture_detector.detector,
-
-                ]
-            )
-        ),
-        visible= True
-    )
-
-    spotify_tab = ft.Container(
-        ft.SafeArea(
-            content=ft.Column(
-                [
-                    ft.Divider(opacity=0, height= 20),
-                    folder_picker,
-                    ft.Divider(opacity=0, height= 20),
-                    ft.Text("Enter Spotify playlist or album url:"),
-                    url,
-                    ft.Divider(opacity=0),  
-                    dd,
-                    ft.Divider(opacity=0),
-                    ft.Row([c1,c2]),
-                    ft.Divider(opacity=0),
-                    # ft.ElevatedButton(text="Download Playlist",width=200000),
-                    downloader_spotify(),
-                    # ft.FilledButton("yt",on_click=switch_to_yt_tab)
-                    gesture_detector.detector,
-                ]
-            )
-        ),
-        visible= False
-    )
-    apple_music_tab = ft.Container(
-        ft.SafeArea(
-            content=ft.Column(
-                [
-                    ft.Divider(opacity=0, height= 20),
-                    folder_picker,
-                    ft.Divider(opacity=0, height= 20),
-                    ft.Text("Enter Apple Music playlist or album url:"),
-                    url,
-                    ft.Divider(opacity=0),  
-                    dd,
-                    ft.Divider(opacity=0),
-                    ft.Row([c1,c2]),
-                    ft.Divider(opacity=0),
-                    # ft.ElevatedButton(text="Download Playlist",width=200000),
-                    downloader_apple_music(),
-                    # ft.FilledButton("yt",on_click=switch_to_yt_tab)
-                    gesture_detector.detector,
-                ]
-            )
-        ),
-        visible= False
-    )
+    youtube_tab = _tab(*yt_children, visible=True)
+    spotify_tab = _tab(*sp_children, visible=False)
+    apple_music_tab = _tab(*am_children, visible=False)
 
     # --- Search tab: allows searching artist/album and batch downloading ---
-    search_query = ft.TextField(keyboard_type=ft.KeyboardType.TEXT, width=800, hint_text="Type artist or album and press Search")
-    # Dropdown to select one candidate from topresult, artists and albums
-    search_candidates_dropdown = ft.Dropdown(label="Select result", width=800, options=[], on_change=lambda e: None)
-    # Show a preview (image + title) for the selected candidate
-    search_result_title = ft.Text("", size=16)
-    search_result_image = ft.Image(src="", width=100, height=100)
-    search_result_box = ft.Row([search_result_image, ft.Column([search_result_title])])
-    search_progress = ft.ProgressBar(value=0)
+    search_query = ft.TextField(keyboard_type=ft.KeyboardType.TEXT, width=800, hint_text="Type artist, album or song and press Search", prefix_icon=ft.Icons.SEARCH)
+    search_candidates_dropdown = ft.Dropdown(label="Select result", width=800, options=[], on_select=lambda e: None)
+    search_result_title = ft.Text("", size=18, weight=ft.FontWeight.W_500)
+    search_result_subtitle = ft.Text("", size=13, color=ft.Colors.ON_SURFACE_VARIANT)
+    search_result_image = ft.Image(src="", width=96, height=96, border_radius=12, fit=ft.BoxFit.COVER)
+    search_result_box = ft.Row(
+        [
+            search_result_image,
+            ft.Column([search_result_title, search_result_subtitle], spacing=4),
+        ],
+        alignment=ft.MainAxisAlignment.CENTER,
+    )
+    search_progress = ft.ProgressBar(value=0, color=ft.Colors.PRIMARY, bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.PRIMARY))
+    search_progress.visible = False
 
     def perform_search(e):
         q = search_query.value.strip()
         if not q:
             return
-        s = Search()
-        try:
-            res = s.search(q)
-        except Exception as err:
-            print(f"Search failed: {err}")
-            res = None
-        # clear previous
-        search_result_title.value = ""
+        search_progress.visible = True
+        search_progress.value = 0
+        search_result_title.value = "Searching..."
+        search_result_subtitle.value = ""
         search_result_image.src = ""
+        search_btn.disabled = True
+        search_progress.update()
         search_result_title.update()
+        search_result_subtitle.update()
         search_result_image.update()
-        if not res or res == "not found":
-            search_result_title.value = "No result"
-            search_result_title.update()
-            search_result_image.update()
-            # clear dropdown
-            search_candidates_dropdown.options = []
-            search_candidates_dropdown.update()
-            e.control.page.update()
-            return
-
-        # Build a flat list of candidates with labels and keep full items in a map
-        candidates = []
-        candidates_map = {}
-        idx = 0
-        if res.get('topresult'):
-            item = res['topresult']
-            label = f"Top: {item.get('title') or item.get('name') or item.get('perma_url','')[:40]}"
-            key = f"c_{idx}"
-            candidates.append(ft.dropdown.Option(key=key, text=label))
-            candidates_map[key] = item
-            idx += 1
-
-        for a in res.get('artists', []):
-            label = f"Artist: {a.get('title') or a.get('name') or a.get('perma_url','')[:40]}"
-            key = f"c_{idx}"
-            candidates.append(ft.dropdown.Option(key=key, text=label))
-            candidates_map[key] = a
-            idx += 1
-
-        for al in res.get('albums', []):
-            label = f"Album: {al.get('title') or al.get('name') or al.get('perma_url','')[:40]}"
-            key = f"c_{idx}"
-            candidates.append(ft.dropdown.Option(key=key, text=label))
-            candidates_map[key] = al
-            idx += 1
-
-        # populate dropdown
-        search_candidates_dropdown.options = candidates
-        search_candidates_dropdown.value = candidates[0].key if candidates else None
-        # save map on page for download
-        e.control.page._search_candidates_map = candidates_map
-
-        # update preview to first candidate
-        if candidates:
-            sel_key = search_candidates_dropdown.value
-            sel_item = candidates_map.get(sel_key)
-            title = sel_item.get('title') or sel_item.get('name') or ''
-            img = sel_item.get('image') or sel_item.get('album_art') or ''
-            search_result_title.value = title + f"  ({sel_item.get('type','')})"
-            search_result_image.src = img
-        else:
-            search_result_title.value = "No result"
-            search_result_image.src = ''
-
-        search_candidates_dropdown.update()
-        search_result_title.update()
-        search_result_image.update()
+        search_btn.update()
         e.control.page.update()
 
-    # update preview when user selects different candidate
-    def candidate_changed(e):
-        sel_key = e.control.value
-        candidates_map = getattr(e.control.page, '_search_candidates_map', {})
+        def runner():
+            try:
+                res = Search().search(q)
+            except Exception as err:
+                print(f"Search failed: {err}")
+                res = None
+            _apply_search_results(e.control.page, res)
+
+        e.control.page.run_thread(runner)
+
+    def _apply_search_results(page, res):
+        search_btn.disabled = False
+        search_progress.visible = False
+        search_progress.value = 0
+        if not res or res == "not found":
+            search_result_title.value = "No result found"
+            search_result_subtitle.value = ""
+            search_result_image.src = ""
+            search_candidates_dropdown.options = []
+            search_candidates_dropdown.value = None
+            candidates_map = {}
+        else:
+            candidates = []
+            candidates_map = {}
+            idx = 0
+
+            def add(kind, item):
+                nonlocal idx
+                title = (item.get('title') or item.get('name') or item.get('perma_url') or '')[:60]
+                label = f"{kind.title()}: {title}"
+                key = f"c_{idx}"
+                candidates.append(ft.dropdown.Option(key=key, text=label))
+                candidates_map[key] = item
+                idx += 1
+
+            for a in res.get('songs', []):
+                add('song', a)
+            if res.get('topresult'):
+                top = res['topresult']
+                if top.get('type') == 'song':
+                    add('song', top)
+                else:
+                    add('topresult', top)
+            for a in res.get('artists', []):
+                add('artist', a)
+            for al in res.get('albums', []):
+                add('album', al)
+
+            search_candidates_dropdown.options = candidates
+            search_candidates_dropdown.value = candidates[0].key if candidates else None
+
+            if candidates:
+                sel_key = search_candidates_dropdown.value
+                _show_candidate(sel_key, candidates_map)
+
+        page._search_candidates_map = candidates_map
+        search_candidates_dropdown.update()
+        search_result_title.update()
+        search_result_subtitle.update()
+        search_result_image.update()
+        search_progress.update()
+        search_btn.update()
+        page.update()
+
+    def _show_candidate(sel_key, candidates_map):
         sel_item = candidates_map.get(sel_key)
         if not sel_item:
             search_result_title.value = "No result"
+            search_result_subtitle.value = ""
             search_result_image.src = ""
-        else:
-            title = sel_item.get('title') or sel_item.get('name') or ''
-            img = sel_item.get('image') or sel_item.get('album_art') or ''
-            search_result_title.value = title + f"  ({sel_item.get('type','')})"
-            search_result_image.src = img
+            return
+        title = sel_item.get('title') or sel_item.get('name') or ''
+        search_result_title.value = title + f"  ({sel_item.get('type', '')})"
+        sub = []
+        if sel_item.get('more_info'):
+            sub.append(sel_item['more_info'].get('primary_artists') or '')
+            sub.append(sel_item['more_info'].get('album') or '')
+        elif sel_item.get('type') == 'album':
+            sub.append(f"{len(sel_item.get('list') or [])} tracks")
+        search_result_subtitle.value = " · ".join([s for s in sub if s])
+        search_result_image.src = sel_item.get('image') or sel_item.get('album_art') or ''
+
+    def candidate_changed(e):
+        sel_key = e.control.value
+        candidates_map = getattr(e.control.page, '_search_candidates_map', {})
+        _show_candidate(sel_key, candidates_map)
         search_result_title.update()
+        search_result_subtitle.update()
         search_result_image.update()
         e.control.page.update()
 
-    # wire dropdown change to handler
-    search_candidates_dropdown.on_change = candidate_changed
+    search_candidates_dropdown.on_select = candidate_changed
 
     def start_download(e):
-        # read selected candidate
         sel_key = search_candidates_dropdown.value
         candidates_map = getattr(e.control.page, '_search_candidates_map', {})
         sel = candidates_map.get(sel_key)
@@ -1477,23 +1290,21 @@ def main(page: ft.Page):
 
         async def run_download():
             s = Search()
-            # decide artist or album or single song
             typ = sel.get('type')
             if typ == 'artist':
-                songs = s.get_songs_from_artist(sel)
+                songs = s.get_songs_from_artist(sel) or []
             elif typ == 'album':
-                songs = s.get_songs_from_album(sel)
+                songs = s.get_songs_from_album(sel) or []
             elif typ == 'song':
-                # single song -> wrap in list
-                songs = [Song(sel)] if 'Song' in globals() else [sel]
+                enriched = s.enrich_song(sel.get('id'))
+                songs = [enriched] if enriched else []
             else:
                 print("Unsupported type for download")
                 return
-
-            total = len(songs)
-            if total == 0:
+            if not songs:
                 print("No songs found to download")
                 return
+            total = len(songs)
             print(f"Starting download of {total} songs...")
             song_count.value = f"Songs to download: {total}"
             song_count.update()
@@ -1502,8 +1313,7 @@ def main(page: ft.Page):
             timeout = aiohttp.ClientTimeout(total=120)
             completed = 0
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                # create tasks in batches of 10
-                tasks = [DownloadSong(song, output_folder=music_folder_path, skip=True).download_song_async(session, sem) for song in songs]
+                tasks = [DownloadSong(song, output_folder=state.music_folder_path, skip=True).download_song_async(session, sem) for song in songs]
                 for fut in asyncio.as_completed(tasks):
                     try:
                         path = await fut
@@ -1516,7 +1326,6 @@ def main(page: ft.Page):
                         e.control.page.update()
                     except Exception as ex:
                         print(f"Song download failed: {ex}")
-                        
             if completed == total:
                 downloaded_count.value = f"all done! Downloaded {completed} songs."
             else:
@@ -1524,55 +1333,92 @@ def main(page: ft.Page):
             downloaded_count.update()
             e.control.page.update()
 
-        # run async download without blocking UI thread
-        try:
-            asyncio.run(run_download())
-            print("Download runner completed")
-        
-        except Exception as err:
-            print(f"Download runner failed: {err}")
+        def runner():
+            try:
+                asyncio.run(run_download())
+                print("Download runner completed")
+            except Exception as err:
+                print(f"Download runner failed: {err}")
 
-    search_btn = ft.ElevatedButton("Search", on_click=perform_search)
-    download_btn = ft.ElevatedButton("Download", on_click=start_download)
-    song_count = ft.Text("")
-    downloaded_count = ft.Text("")
+        e.control.page.run_thread(runner)
+
+    search_btn = ft.FilledButton(
+        "Search",
+        icon=ft.Icons.SEARCH,
+        on_click=perform_search,
+        style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)),
+    )
+    download_btn = ft.FilledButton(
+        "Download",
+        icon=ft.Icons.DOWNLOAD,
+        on_click=start_download,
+        style=ft.ButtonStyle(
+            shape=ft.RoundedRectangleBorder(radius=10),
+            padding=ft.Padding(24, 14, 24, 14),
+        ),
+    )
+    song_count = ft.Text("", size=14, weight=ft.FontWeight.W_500)
+    downloaded_count = ft.Text("", size=13, color=ft.Colors.ON_SURFACE_VARIANT)
 
     search_tab = ft.Container(
-        ft.SafeArea(
-            content=ft.Column([
-                ft.Divider(opacity=0, height=20),
-                folder_picker,
-                ft.Divider(opacity=0, height=20),
-                ft.Text("Search Artist or Album:"),
-                ft.Row([search_query, search_btn]),
-                ft.Divider(opacity=0),
-                search_candidates_dropdown,
-                search_result_box,                
-                ft.Divider(opacity=0),
-                download_btn,
-                song_count,
-                search_progress,
-                downloaded_count,
-                gesture_detector.detector,
-
-            ])
+        ft.ListView(
+            [
+                ft.Container(
+                    ft.Column(
+                        [
+                            folder_picker,
+                            ft.Divider(height=12, opacity=0),
+                            ft.Card(
+                                content=ft.Container(
+                                    padding=16,
+                                    content=ft.Column([
+                                        ft.Text("Search songs, artists or albums",
+                                                size=15, weight=ft.FontWeight.W_600),
+                                        ft.Text("Search on JioSaavn (Saavn) and batch download tracks.",
+                                                size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+                                        ft.Divider(height=12, opacity=0),
+                                        ft.Row([search_query, search_btn], spacing=8),
+                                        ft.Divider(height=8, opacity=0),
+                                        search_candidates_dropdown,
+                                        ft.Divider(height=8, opacity=0),
+                                        search_result_box,
+                                    ], spacing=10),
+                                )
+                            ),
+                            ft.Divider(height=8, opacity=0),
+                            ft.Card(
+                                content=ft.Container(
+                                    padding=16,
+                                    content=ft.Column([
+                                        download_btn,
+                                        song_count,
+                                        search_progress,
+                                        downloaded_count,
+                                    ], spacing=8, horizontal_alignment=ft.CrossAxisAlignment.START),
+                                )
+                            ),
+                            gesture_detector.detector,
+                        ],
+                        spacing=8,
+                    ),
+                    padding=ft.Padding(12, 12, 12, 12),
+                )
+            ],
+            spacing=10,
         ),
-        visible=False
+        visible=False,
     )
 
-    page.spotify_tab=spotify_tab
+    page.spotify_tab = spotify_tab
     page.youtube_tab = youtube_tab
     page.apple_music_tab = apple_music_tab
     page.search_tab = search_tab
-    page.overlay.extend([ get_directory_dialog])
     
+
     page.add(
-        youtube_tab,spotify_tab,apple_music_tab, search_tab
+        youtube_tab, spotify_tab, apple_music_tab, search_tab
     )
-    for i in range(0, 101):
-            pb.value = i * 0.01
-            time.sleep(0.1)
-            page.update()
 
 
-ft.app(target=main)
+if __name__ == "__main__":
+    ft.run(main=main)

@@ -9,7 +9,6 @@ yt-dlp
 rich
 yarl
 beautifulsoup4
-ssl
 pyDes
 pytube-cypher-fix==15.0.2
-    
+aiohttp

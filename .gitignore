@@ -120,6 +120,21 @@ ENV/
 env.bak/
 venv.bak/
 
+# Trackster app runtime state (SQLite + legacy state files)
+trackster.db
+trackster.db-journal
+downloaded.txt
+mismatched_downloads.txt
+failed_downloads.txt
+song_names.txt
+synced.txt
+synced_updated.txt
+/music-yt
+
+# Packaged builds + IDE
+/output/
+/.vscode/
+
 # Spyder project settings
 .spyderproject
 .spyproject

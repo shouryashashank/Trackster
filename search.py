@@ -4,7 +4,10 @@ from pyDes import *
 import os
 import urllib.request
 import time
-from moviepy.editor import AudioFileClip
+try:
+    from moviepy.editor import AudioFileClip  # moviepy 1.x
+except ImportError:
+    from moviepy.audio.io.AudioFileClip import AudioFileClip  # moviepy 2.x
 from mutagen.id3 import ID3, TIT2, TPE1, TPE2, TALB, TDRC, TRCK, TSRC, USLT, APIC
 import asyncio
 import aiohttp
@@ -20,8 +23,9 @@ class Song:
         self.raw = song_json or {}
         # common top-level fields
         self.id = self.raw.get('id')
-        self.title = self.raw.get('title')
-        self.subtitle = self.raw.get('subtitle')
+        self.title = self.raw.get('title') or self.raw.get('song')
+        self.subtitle = (self.raw.get('subtitle') or self.raw.get('primary_artists')
+                         or self.raw.get('singers'))
         self.type = self.raw.get('type')
         self.perma_url = self.raw.get('perma_url')
         self.image = self.raw.get('image')
@@ -36,7 +40,10 @@ class Song:
         self.album_id = self.more_info.get('album_id')
         self.album = self.more_info.get('album')
         self.duration = self.more_info.get('duration')
-        self.encrypted_media_url = self.more_info.get('encrypted_media_url')
+        self.encrypted_media_url = (
+            self.more_info.get('encrypted_media_url')
+            or self.raw.get('encrypted_media_url')
+        )
         self.decrypted_media_url = self.decrypt_url(self.encrypted_media_url) if self.encrypted_media_url else None
         self.vlink = self.more_info.get('vlink')
         self.artistMap = self.more_info.get('artistMap', {})
@@ -96,6 +103,7 @@ class Search:
             return None
 
         topresult = None
+        songs = []
         artists = []
         albums = []
 
@@ -103,66 +111,101 @@ class Search:
         top_query_data = data.get('topquery', {}).get('data', [])
         if isinstance(top_query_data, list) and top_query_data:
             topresult = top_query_data[0]
-            # also collect artists/albums from topquery
-            for item in top_query_data:
-                if item.get('type') == 'artist' and len(artists) < 3:
-                    artists.append(item)
-                elif item.get('type') == 'album' and len(albums) < 3:
-                    albums.append(item)
 
-        # fallback: scan full response for items
-        def scan(obj,topresult_ref):
-            if isinstance(obj, dict):
-                for v in obj.values():
-                    scan(v,topresult_ref)
-            elif isinstance(obj, list):
-                for elem in obj:
-                    if isinstance(elem, dict):
-                        t = elem.get('type')
-                        if t == 'artist' and len(artists) < 3:
-                            artists.append(elem)
-                        elif t == 'album' and len(albums) < 3:
-                            albums.append(elem)
-                        # capture topresult if still none
-                        if topresult_ref is None and elem.get('type') in ('artist', 'album', 'song'):
-                            topresult_ref = elem
-                        # stop early if all collected
-                        if len(artists) >= 3 and len(albums) >= 3 and topresult_ref is not None:
-                            return
-                        scan(elem,topresult_ref)
-        # run scan
-        scan(data,topresult)
+        # collect from the dedicated top-level collections
+        for key, bucket in (("songs", songs), ("artists", artists), ("albums", albums)):
+            for item in (data.get(key, {}).get('data') or [])[:5]:
+                if item.get('type') == key[:-1] or key == 'songs':
+                    bucket.append(item)
+            # also sweep topquery for anything missing
+            for item in top_query_data:
+                if item.get('type') == key[:-1] and not any(
+                    (x.get('id') or x.get('url')) == (item.get('id') or item.get('url')) for x in bucket
+                ):
+                    bucket.append(item)
+
+        # if the preferred bucket is empty, fall back to a full recursive scan
+        if not songs and not artists and not albums and not topresult:
+            def scan(obj, topresult_ref):
+                if isinstance(obj, dict):
+                    for v in obj.values():
+                        scan(v, topresult_ref)
+                elif isinstance(obj, list):
+                    for elem in obj:
+                        if isinstance(elem, dict):
+                            t = elem.get('type')
+                            if t == 'artist' and len(artists) < 3:
+                                artists.append(elem)
+                            elif t == 'album' and len(albums) < 3:
+                                albums.append(elem)
+                            elif t == 'song' and len(songs) < 3:
+                                songs.append(elem)
+                            if topresult_ref is None and elem.get('type') in ('artist', 'album', 'song'):
+                                topresult_ref = elem
+                            if len(artists) >= 3 and len(albums) >= 3 and len(songs) >= 3 and topresult_ref is not None:
+                                return
+                        scan(elem, topresult_ref)
+            scan(data, topresult)
 
         # ensure uniqueness
         def uniq(lst):
             seen = set()
             out = []
             for it in lst:
-                id_ = it.get('id') or it.get('perma_url') or repr(it)
+                id_ = it.get('id') or it.get('url') or it.get('perma_url') or repr(it)
                 if id_ not in seen:
                     seen.add(id_)
                     out.append(it)
             return out
 
+        songs = uniq(songs)[:5]
         artists = uniq(artists)[:3]
         albums = uniq(albums)[:3]
 
         result = {
             'topresult': topresult,
+            'songs': songs,
             'artists': artists,
             'albums': albums,
         }
 
         # if nothing meaningful found, return "not found" to keep compatibility
-        if not topresult and not artists and not albums:
+        if not topresult and not songs and not artists and not albums:
             return "not found"
 
         return result
 
+    def enrich_song(self, pid):
+        """Fetch full song JSON (incl. encrypted media URL) for a given pid.
+
+        The autocomplete.search result only carries a stub: id + vlink, but no
+        downloadable media. Query song.getDetails by pid to get a full record so
+        a Song built from it has a usable decrypted_media_url.
+        """
+        if not pid:
+            return None
+        url = ('https://www.jiosaavn.com/api.php?__call=song.getDetails'
+               '&cc=in&_marker=0%3F_marker%3D0&_format=json&pids=' + str(pid))
+        try:
+            resp = requests.get(url, timeout=15)
+        except Exception as e:
+            print(f"Error fetching song details for {pid}: {e}")
+            return None
+        if resp.status_code != 200:
+            return None
+        try:
+            data = resp.json()
+        except Exception:
+            return None
+        detail = data.get(str(pid)) or next(iter(data.values()), None)
+        if not detail:
+            return None
+        return Song(detail)
+
     def get_songs_from_artist(self, artist_json):
         artist_id = artist_json.get('id')
         if not artist_id:
-            return "Artist ID not found"
+            return []
         perma = artist_json.get('url')
         if not perma:
             return []
@@ -525,30 +568,20 @@ class DownloadSong:
 def main():
     search_instance = Search()
     query = "From zero"
-    result = search_instance.search(query)
-    print(result)
-    if result:
-        if result.get('type') == 'artist':
-            print("Fetching songs for artist...")
-            songs = search_instance.get_songs_from_artist(result)
-            for song in songs:
-                print(song.to_dict())
-        elif result.get('type') == 'album':
-            print("Fetching songs for album...")
-            songs = search_instance.get_songs_from_album(result)
-            # run downloads in parallel using asyncio and aiohttp
-            async def run_all():
-                sem = asyncio.Semaphore(4)  # limit concurrency
-                timeout = ClientTimeout(total=120)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    tasks = [DownloadSong(song).download_song_async(session, sem) for song in songs]
-                    for fut in asyncio.as_completed(tasks):
-                        try:
-                            path = await fut
-                            print(f"Downloaded: {path}")
-                        except Exception as e:
-                            print(f"Download failed: {e}")
-            asyncio.run(run_all())
+    result = search_instance.search(query) or {}
+    print("\ntopresult:", (result.get('topresult') or {}).get('title'))
+    print("artists:", [a.get('title') for a in result.get('artists', [])])
+    print("albums:", [a.get('title') for a in result.get('albums', [])])
+    if result.get('artists'):
+        print("Fetching songs for artist...")
+        songs = search_instance.get_songs_from_artist(result['artists'][0])
+        for song in songs:
+            print(song.to_dict())
+    if result.get('albums'):
+        print("Fetching songs for album...")
+        songs = search_instance.get_songs_from_album(result['albums'][0])
+        for song in songs:
+            print(song.to_dict())
 
 if __name__ == "__main__":
     main()
