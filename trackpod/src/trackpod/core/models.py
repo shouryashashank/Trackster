@@ -5,12 +5,10 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
-    Boolean,
     DateTime,
     ForeignKey,
     Integer,
     String,
-    Text,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -65,7 +63,10 @@ class Track(Base):
     artwork: Mapped[str] = mapped_column(String, default="")
     title_id: Mapped[str] = mapped_column(String, unique=True, index=True)  # dedup key
     resolved_from: Mapped[str | None] = mapped_column(String, nullable=True)  # saavn|youtube
-    state: Mapped[str] = mapped_column(String, default="pending")  # pending|resolving|downloading|done|failed|mismatch
+    media_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    # decrypted saavn url / youtube watch url
+    state: Mapped[str] = mapped_column(String, default="pending")
+    # pending|resolving|downloading|done|failed|mismatch
 
     files: Mapped[list[TrackFile]] = relationship(
         back_populates="track", cascade="all, delete-orphan"

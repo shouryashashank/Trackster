@@ -60,7 +60,8 @@ class Database:
         self.engine: Engine = create_engine(
             f"sqlite:///{self.path}", echo=False, future=True
         )
-        self.Session = sessionmaker(bind=self.engine, future=True)
+        self.Session = sessionmaker(bind=self.engine, future=True,
+                                    expire_on_commit=False)
 
     def init(self) -> None:
         Base.metadata.create_all(self.engine)

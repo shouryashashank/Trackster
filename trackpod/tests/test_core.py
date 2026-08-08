@@ -4,7 +4,7 @@ from pathlib import Path
 
 from trackpod.core.config import Settings, user_data_dir
 from trackpod.core.db import Database
-from trackpod.core.models import Source, Track, TrackFile, Artist
+from trackpod.core.models import Artist, Track, TrackFile
 
 
 def test_user_data_dir_is_absolute_and_named():
@@ -42,7 +42,6 @@ def test_track_models_roundtrip(tmp_path):
         artist = Artist(name="Artist", external_id="a1")
         session.add_all([track, artist])
         session.commit()
-        ids = (track.id, artist.id)
     with db.session() as session:
         t = session.query(Track).filter_by(title_id="song||artist").one_or_none()
         assert t is not None and t.state == "done"
