@@ -154,3 +154,8 @@ failed_downloads.txt
 /music-yt
 assets/youtube-svgrepo-com.svgZone.Identifier
 synced_updated.txt
+
+# Builds & IDE (trackpod branch)
+/output/
+/.vscode/
+

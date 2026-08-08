@@ -1,0 +1,25 @@
+# Runtime / secrets (never commit)
+.env
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# IDE / misc
+.vscode/
+.idea/
+*.log
+
+# Runtime music output
+Music/
+tmp/
